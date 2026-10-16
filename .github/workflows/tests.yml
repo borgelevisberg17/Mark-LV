@@ -37,3 +37,5 @@ jobs:
         run: python -m unittest discover -s tests -p 'test_office_actions_integration.py' -v
       - name: Test direct Office document opening and EPUB conversion
         run: python -m unittest discover -s tests -p 'test_office_documents.py' -v
+      - name: Test advanced Office editing and EPUB publishing
+        run: python -m unittest discover -s tests -p 'test_office_editor.py' -v
