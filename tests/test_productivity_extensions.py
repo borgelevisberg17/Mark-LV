@@ -36,7 +36,7 @@ class ResumableUploadHelperTests(unittest.TestCase):
 
     def test_remote_path_accepts_relative_paths(self):
         self.assertEqual(_safe_remote_path("Reports/October.xlsx"), "Reports/October.xlsx")
-        self.assertEqual(_safe_remote_path(r"Reports\October.xlsx"), r"Reports\October.xlsx")
+        self.assertEqual(_safe_remote_path(r"Reports\October.xlsx"), "Reports/October.xlsx")
 
 
 if __name__ == "__main__":
