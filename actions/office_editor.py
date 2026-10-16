@@ -567,7 +567,7 @@ def _run_epubcheck(path: Path) -> str:
         )
     except subprocess.TimeoutExpired as exc:
         raise ValueError("EPUBCheck exceeded the 120-second validation timeout.") from exc
-    output = "\\n".join(part.strip() for part in (completed.stdout, completed.stderr) if part.strip())
+    output = "\n".join(part.strip() for part in (completed.stdout, completed.stderr) if part.strip())
     if completed.returncode != 0:
         detail = output[-2000:] if output else "No diagnostic output was returned."
         raise ValueError(f"EPUBCheck rejected the publication (exit {completed.returncode}): {detail}")
