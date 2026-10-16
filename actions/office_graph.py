@@ -162,12 +162,14 @@ def _poll_login() -> str:
         )
         payload = response.json()
         if response.status_code < 400 and payload.get("access_token"):
+            granted_scope_text = str(payload.get("scope") or " ".join(flow["scopes"]))
+            granted_scopes = sorted({scope.casefold() for scope in granted_scope_text.split()})
             cache = {
                 "access_token": payload["access_token"],
                 "refresh_token": payload.get("refresh_token", ""),
                 "expires_at": time.time() + max(0, int(payload.get("expires_in", 3600)) - 60),
-                "scope": payload.get("scope", " ".join(flow["scopes"])),
-                "scopes": flow["scopes"],
+                "scope": granted_scope_text,
+                "scopes": granted_scopes,
             }
             _save_cache(cache)
             _PENDING_FLOW = None
@@ -185,9 +187,10 @@ def _poll_login() -> str:
 
 def _access_token(required: set[str]) -> tuple[str | None, str]:
     cache = _load_cache()
-    scopes = set(cache.get("scopes", []))
-    if not cache.get("refresh_token") or not required.issubset(scopes):
-        missing = ", ".join(sorted(required - scopes)) or "Microsoft account sign-in"
+    scopes = {str(scope).casefold() for scope in cache.get("scopes", [])}
+    required_normalized = {scope.casefold() for scope in required}
+    if not cache.get("refresh_token") or not required_normalized.issubset(scopes):
+        missing = ", ".join(sorted(required_normalized - scopes)) or "Microsoft account sign-in"
         return None, f"Authorization is missing: {missing}. Call office_graph with operation=start_login and scope_set=all."
     if cache.get("access_token") and time.time() < float(cache.get("expires_at", 0)):
         return str(cache["access_token"]), ""
