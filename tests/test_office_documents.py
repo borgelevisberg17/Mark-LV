@@ -49,7 +49,8 @@ class OfficeDocumentOpenTests(unittest.TestCase):
                     "file_path": str(path),
                 })
         self.assertIn(path.name, result)
-        startfile.assert_called_once()\n        self.assertEqual(Path(startfile.call_args.args[0]).name, path.name)
+        startfile.assert_called_once()
+        self.assertEqual(Path(startfile.call_args.args[0]).name, path.name)
 
     def test_finds_created_document_by_filename_in_marklv_folder(self):
         path = self.docs / "ebook_oceano.epub"
@@ -61,7 +62,8 @@ class OfficeDocumentOpenTests(unittest.TestCase):
                     "filename": "ebook_oceano.epub",
                 })
         self.assertIn(path.name, result)
-        startfile.assert_called_once()\n        self.assertEqual(Path(startfile.call_args.args[0]).name, path.name)
+        startfile.assert_called_once()
+        self.assertEqual(Path(startfile.call_args.args[0]).name, path.name)
 
     def test_word_request_converts_epub_to_docx_and_opens_the_copy(self):
         try:
