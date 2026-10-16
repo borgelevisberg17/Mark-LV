@@ -2,6 +2,8 @@ import time
 import subprocess
 import platform
 import shutil
+import shlex
+import os
 
 try:
     import psutil
@@ -65,41 +67,40 @@ _APP_ALIASES: dict[str, dict[str, str]] = {
 }
 
 
-def _normalize(raw: str) -> str:
-    key = raw.lower().strip()
+def _normalize(raw: str) -> str | None:
+    """Resolve only exact, predeclared aliases; never interpret user text as a command."""
+    os_map = _APP_ALIASES.get(raw.lower().strip())
+    return os_map.get(_SYSTEM) if os_map else None
 
-    if key in _APP_ALIASES:
-        return _APP_ALIASES[key].get(_SYSTEM, raw)
-
-    for alias_key, os_map in _APP_ALIASES.items():
-        if alias_key in key or key in alias_key:
-            return os_map.get(_SYSTEM, raw)
-
-    return raw  
 
 def _launch_windows(app_name: str) -> bool:
-
-    if shutil.which(app_name) or shutil.which(app_name.split(".")[0]):
+    # URI activation is handled by the OS API, never by a shell command.
+    if app_name.startswith("ms-settings:"):
         try:
+            os.startfile(app_name)  # type: ignore[attr-defined]
+            time.sleep(1.0)
+            return True
+        except Exception as e:
+            print(f"[open_app] URI launch failed: {e}")
+
+    # app_name comes only from _APP_ALIASES. Split trusted alias arguments and
+    # always execute directly; never pass a command string to cmd.exe.
+    try:
+        argv = shlex.split(app_name, posix=False)
+        executable = argv[0].strip('"') if argv else ""
+        if executable and (shutil.which(executable) or os.path.exists(executable)):
             subprocess.Popen(
-                app_name,
-                shell=True,
+                argv,
+                shell=False,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
             time.sleep(1.5)
             return True
-        except Exception as e:
-            print(f"[open_app] subprocess failed: {e}")
+    except Exception as e:
+        print(f"[open_app] subprocess failed: {e}")
 
-    if ":" in app_name:
-        try:
-            subprocess.Popen(f"start {app_name}", shell=True)
-            time.sleep(1.0)
-            return True
-        except Exception:
-            pass
-
+    # Fallback is limited to an approved alias, not arbitrary model text.
     try:
         import pyautogui
         pyautogui.PAUSE = 0.1
@@ -243,17 +244,22 @@ def open_app(
     player=None,
     session_memory=None,
 ) -> str:
-    app_name = (parameters or {}).get("app_name", "").strip()
-
-    if not app_name:
+    raw_app_name = (parameters or {}).get("app_name", "")
+    if not isinstance(raw_app_name, str) or not raw_app_name.strip():
         return "No application name provided."
+
+    app_name = raw_app_name.strip()
+    normalized = _normalize(app_name)
+    if normalized is None:
+        return (
+            f"Application '{app_name}' is not in the approved application list. "
+            "Use a supported application alias."
+        )
 
     launcher = _OS_LAUNCHERS.get(_SYSTEM)
     if launcher is None:
         return f"Unsupported operating system: {_SYSTEM}"
-
-    normalized = _normalize(app_name)
-    print(f"[open_app] Launching: '{app_name}' → '{normalized}' ({_SYSTEM})")
+    print(f"[open_app] Launching approved alias: '{app_name}' → '{normalized}' ({_SYSTEM})")
 
     if player:
         player.write_log(f"[open_app] {app_name}")
@@ -261,9 +267,6 @@ def open_app(
     try:
         if launcher(normalized):
             return f"Opened {app_name}."
-        if normalized.lower() != app_name.lower():
-            if launcher(app_name):
-                return f"Opened {app_name}."
         return (
             f"Could not confirm that {app_name} launched. "
             f"It may still be loading, or it might not be installed."

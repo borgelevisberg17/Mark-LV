@@ -1,4 +1,5 @@
 import subprocess
+import shutil
 import sys
 import json
 import re
@@ -275,21 +276,25 @@ def _install_dependencies(dependencies: list[str], project_dir: Path) -> str:
         return f"Install error (non-fatal): {e}"
 
 def _open_vscode(project_dir: Path) -> bool:
-    vscode_candidates = [
-        "code",
-        rf"C:\Users\{Path.home().name}\AppData\Local\Programs\Microsoft VS Code\bin\code.cmd",
-        r"C:\Program Files\Microsoft VS Code\bin\code.cmd",
+    # Launch only a concrete executable; never pass a dynamic path through cmd.exe.
+    candidates = [
+        shutil.which("Code.exe"),
+        str(Path.home() / "AppData/Local/Programs/Microsoft VS Code/Code.exe"),
+        r"C:\Program Files\Microsoft VS Code\Code.exe",
+        r"C:\Program Files (x86)\Microsoft VS Code\Code.exe",
     ]
-    for cmd in vscode_candidates:
+    for candidate in candidates:
+        if not candidate or not Path(candidate).is_file():
+            continue
         try:
             subprocess.Popen(
-                [cmd, str(project_dir)],
-                shell=True,
+                [candidate, str(project_dir)],
+                shell=False,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
+                stderr=subprocess.DEVNULL,
             )
             time.sleep(1.5)
-            print(f"[DevAgent] 💻 VSCode opened: {project_dir}")
+            print(f"[DevAgent] VS Code opened: {project_dir}")
             return True
         except Exception:
             continue
