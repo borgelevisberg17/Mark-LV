@@ -80,12 +80,11 @@ def _generate(params: dict) -> tuple[Path, str]:
     client = genai.Client(api_key=_api_key())
     contents = [prompt]
     if source:
-        contents.append(types.Part.from_bytes(
-            data=source.read_bytes(),
-            mime_type={" .png": "image/png"}.get(" " + source.suffix.lower(), {
-                ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"
-            }.get(source.suffix.lower(), "image/png"))
-        )
+        source_mime = {
+            ".png": "image/png", ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg", ".webp": "image/webp",
+        }[source.suffix.lower()]
+        contents.append(types.Part.from_bytes(data=source.read_bytes(), mime_type=source_mime))
     model = str(params.get("model", "") or _MODEL_DEFAULT).strip()
     if not model or len(model) > 100 or any(ch.isspace() for ch in model):
         raise ValueError("model must be a valid model identifier.")
@@ -109,11 +108,6 @@ def _generate(params: dict) -> tuple[Path, str]:
         from PIL import Image
         with Image.open(temporary) as image:
             image.verify()
-        with zipfile.ZipFile(temporary) as _:
-            pass
-    except zipfile.BadZipFile:
-        # PNG/JPEG/WEBP are not ZIP archives; Pillow verification above is authoritative.
-        pass
     except Exception:
         temporary.unlink(missing_ok=True)
         raise
