@@ -7,6 +7,7 @@ sandbox: approved code still runs with the current user's permissions.
 from __future__ import annotations
 
 import os
+import hashlib
 import shlex
 import subprocess
 import sys
@@ -44,34 +45,59 @@ def request_execution(
     detail: str,
     operation: Callable[[], str],
     player=None,
+    category: str = "general",
+    permissions: Sequence[str] = (),
+    fingerprint: str = "",
 ) -> str:
-    """Ask the user via the UI, then execute only after the user accepts."""
+    """Queue an operation for approval with a stable deduplication key."""
     from core import confirm
+    from core.operation_registry import stable_key
+
+    # Callers should supply a payload fingerprint where the visible detail does
+    # not uniquely describe the effect (for example generated desktop code).
+    payload = fingerprint or f"{title}\n{detail}"
+    idempotency_key = f"{key}:{stable_key(payload)}"
 
     def approved_operation() -> str:
         started = time.monotonic()
-        _log(player, f"Started: {title}")
+        _log(player, f"Started: {title} [category={category}; permissions={','.join(permissions) or 'none'}]")
         try:
             result = operation() or "Execution completed."
             elapsed = time.monotonic() - started
-            _log(player, f"Finished: {title} ({elapsed:.1f}s)")
+            _log(player, f"Finished: {title} ({elapsed:.1f}s; status=completed)")
             if result:
                 _log(player, result[:MAX_OUTPUT_CHARS])
             return result
         except Exception as exc:
-            _log(player, f"Failed: {title}: {exc}")
+            elapsed = time.monotonic() - started
+            _log(player, f"Failed: {title} ({elapsed:.1f}s; status=failed): {exc}")
             raise
 
-    return confirm.request(key=key, title=title, detail=detail, run=approved_operation)
+    return confirm.request(
+        key=idempotency_key, title=title, detail=detail, run=approved_operation,
+        category=category, permissions=tuple(permissions),
+    )
 
 
-def _validate_timeout(timeout: int | float | None) -> int:
+CATEGORY_TIMEOUTS = {
+    "desktop": 60,
+    "python_file": 60,
+    "general": DEFAULT_TIMEOUT_SECONDS,
+    "project": MAX_TIMEOUT_SECONDS,
+    "dependency_install": MAX_TIMEOUT_SECONDS,
+}
+
+
+def _validate_timeout(timeout: int | float | None, category: str = "general") -> int:
     try:
         value = DEFAULT_TIMEOUT_SECONDS if timeout is None else int(timeout)
     except (TypeError, ValueError) as exc:
-        raise ExecutionPolicyError("Timeout must be an integer between 1 and 300 seconds.") from exc
-    if not 1 <= value <= MAX_TIMEOUT_SECONDS:
-        raise ExecutionPolicyError("Timeout must be between 1 and 300 seconds.")
+        raise ExecutionPolicyError("Timeout must be an integer within the category limit.") from exc
+    category_limit = CATEGORY_TIMEOUTS.get(category, DEFAULT_TIMEOUT_SECONDS)
+    if not 1 <= value <= min(MAX_TIMEOUT_SECONDS, category_limit):
+        raise ExecutionPolicyError(
+            f"Timeout for category '{category}' must be between 1 and {category_limit} seconds."
+        )
     return value
 
 
@@ -124,7 +150,7 @@ def run_python_file(path: str | Path, timeout: int | float | None = None) -> str
         raise ExecutionPolicyError("The run action supports existing .py files only.")
     if target.stat().st_size > MAX_FILE_BYTES:
         raise ExecutionPolicyError("Python file exceeds the 2 MiB execution limit.")
-    return _run_process([sys.executable, str(target)], target.parent, _validate_timeout(timeout))
+    return _run_process([sys.executable, str(target)], target.parent, _validate_timeout(timeout, 'python_file'))
 
 
 def run_python_code(code: str, timeout: int | float | None = None) -> str:
@@ -137,7 +163,7 @@ def run_python_code(code: str, timeout: int | float | None = None) -> str:
         raise ExecutionPolicyError("Generated Python code is empty.")
     if len(code.encode("utf-8")) > MAX_CODE_BYTES:
         raise ExecutionPolicyError("Generated Python code exceeds the 256 KiB limit.")
-    timeout_value = _validate_timeout(timeout)
+    timeout_value = _validate_timeout(timeout, 'desktop')
     bootstrap = r'''
 import os, sys, time, shutil
 from pathlib import Path
@@ -199,7 +225,7 @@ def run_project_command(command: str, project_dir: str | Path, timeout: int | fl
     cwd = resolve_user_path(project_dir, roots=[Path.home()], must_exist=True)
     if not cwd.is_dir():
         raise ExecutionPolicyError("Project working directory must be a directory.")
-    return _run_process(parse_command(command), cwd, _validate_timeout(timeout))
+    return _run_process(parse_command(command), cwd, _validate_timeout(timeout, 'project'))
 
 
 def install_dependencies(dependencies: Sequence[str], project_dir: str | Path,
