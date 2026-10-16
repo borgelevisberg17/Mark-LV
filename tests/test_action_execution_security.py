@@ -59,5 +59,31 @@ class ActionExecutionSecurityTests(unittest.TestCase):
                 )
 
 
+
+    def test_dev_agent_does_not_run_unisolated_project_commands(self):
+        tree = ast.parse(_read("actions/dev_agent.py"), filename="actions/dev_agent.py")
+        for function_name in ("_install_dependencies", "_run_project", "_try_auto_install"):
+            with self.subTest(function=function_name):
+                node = _function(tree, function_name)
+                for child in ast.walk(node):
+                    if not isinstance(child, ast.Call):
+                        continue
+                    if isinstance(child.func, ast.Attribute):
+                        self.assertFalse(
+                            isinstance(child.func.value, ast.Name)
+                            and child.func.value.id == "subprocess"
+                            and child.func.attr in {"run", "Popen", "call", "check_call", "check_output"},
+                            f"{function_name} must not spawn unisolated processes",
+                        )
+
+    def test_file_actions_use_shared_path_policy(self):
+        controller = _read("actions/file_controller.py")
+        processor = _read("actions/file_processor.py")
+        self.assertIn("from core.path_policy import", controller)
+        self.assertIn("resolve_child_path", controller)
+        self.assertIn("from core.path_policy import", processor)
+        self.assertIn("_safe_extract_archive", processor)
+        self.assertNotIn("shutil.unpack_archive(path, dest)", processor)
+
 if __name__ == "__main__":
     unittest.main()
