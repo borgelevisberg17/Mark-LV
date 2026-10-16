@@ -161,5 +161,63 @@ class MicrosoftCredentialStorageTests(unittest.TestCase):
         self.assertLess(office_graph._CREDENTIAL_CHUNK_MAX_BYTES, 2560)
 
 
+    def test_session_status_resolves_and_persists_account_identity(self):
+        office_graph._save_cache({
+            "access_token": "old-access",
+            "refresh_token": "saved-refresh",
+            "expires_at": 9999999999,
+            "scopes": ["user.read", "offline_access"],
+        })
+        profile = {
+            "displayName": "Borge Levisberg",
+            "mail": "borge@example.com",
+            "userPrincipalName": "borge@example.com",
+            "id": "account-id",
+        }
+        with patch.object(office_graph, "_access_token", return_value=("valid-access", "")):
+            with patch.object(office_graph, "_graph", return_value=profile):
+                result = json.loads(office_graph.office_graph({"operation": "session_status"}))
+
+        self.assertTrue(result["connected"])
+        self.assertEqual(result["display_name"], "Borge Levisberg")
+        self.assertEqual(result["email"], "borge@example.com")
+        saved = office_graph._load_cache()
+        self.assertEqual(saved["account_name"], "Borge Levisberg")
+        self.assertEqual(saved["account_email"], "borge@example.com")
+        self.assertEqual(saved["account_id"], "account-id")
+
+    def test_logout_removes_persisted_manifest_and_all_session_chunks(self):
+        office_graph._save_cache({
+            "access_token": "A" * 3000,
+            "refresh_token": "R" * 4000,
+            "scopes": ["user.read", "offline_access"],
+        })
+        self.assertTrue(office_graph._load_cache())
+        office_graph._PENDING_FLOW = {"device_code": "pending"}
+
+        result = office_graph.office_graph({"operation": "logout"})
+
+        self.assertIn("disconnected", result.casefold())
+        self.assertEqual(office_graph._load_cache(), {})
+        self.assertIsNone(office_graph._PENDING_FLOW)
+        self.assertIsNone(self.store.get_password(
+            office_graph._CREDENTIAL_SERVICE, office_graph._CREDENTIAL_USERNAME
+        ))
+        self.assertFalse(any(
+            service == office_graph._CREDENTIAL_SERVICE and ":chunk:" in username
+            for service, username in self.store.values
+        ))
+
+    def test_start_login_does_not_start_another_flow_when_connected(self):
+        with patch.object(
+            office_graph, "_account_status",
+            return_value={"connected": True, "display_name": "Borge", "email": "b@example.com"},
+        ):
+            result = office_graph.office_graph({"operation": "start_login"})
+
+        self.assertIn("Already connected to Borge", result)
+        self.assertIsNone(office_graph._PENDING_FLOW)
+
+
 if __name__ == "__main__":
     unittest.main()
