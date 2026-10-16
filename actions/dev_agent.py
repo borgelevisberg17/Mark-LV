@@ -72,7 +72,10 @@ def _classify_error(output: str) -> str:
 
     low = output.lower()
 
-    if any(x in low for x in ("no module named", "modulenotfounderror", "importerror")):
+    if any(x in low for x in (
+        "no module named", "modulenotfounderror", "importerror",
+        "cannot find module", "cannot find package", "err_module_not_found",
+    )):
         return "dependency_error"
 
     if "syntaxerror" in low or "invalid syntax" in low:
@@ -475,6 +478,14 @@ def _build_project(
     entry_point  = plan.get("entry_point", "main.py")
     run_command  = plan.get("run_command", f"python {entry_point}")
     dependencies = plan.get("dependencies", [])
+
+    if not isinstance(files, list) or not files:
+        return "The project planner returned an invalid or empty file list."
+    if not isinstance(run_command, str) or not run_command.strip():
+        return "The project planner returned an invalid run command."
+    if not isinstance(dependencies, list) or any(
+        not isinstance(item, str) or not item.strip() for item in dependencies
+    ):
 
     log(f"Project: {proj_name} | Files: {len(files)} | Entry: {entry_point}")
 
