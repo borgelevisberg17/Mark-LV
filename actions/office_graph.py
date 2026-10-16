@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import time
 from pathlib import Path
 from urllib.parse import quote
@@ -27,6 +28,7 @@ _CREDENTIAL_USERNAME = "delegated-token-cache"
 _PENDING_FLOW: dict | None = None
 _MAX_BODY = 12000
 _MAX_UPLOAD_BYTES = 4 * 1024 * 1024
+_UPLOAD_CHUNK_BYTES = 5 * 1024 * 1024  # 16 x 320 KiB, as required by Graph
 
 _ALL_SCOPES = (
     "User.Read", "Calendars.ReadWrite", "Mail.Read", "Mail.Send",
@@ -49,6 +51,7 @@ _REQUIRED = {
     "mail_send": {"Mail.Send"},
     "drive_list": {"Files.ReadWrite"},
     "drive_upload": {"Files.ReadWrite"},
+    "drive_upload_resume": {"Files.ReadWrite"},
     "drive_download": {"Files.ReadWrite"},
     "onenote_list": {"Notes.ReadWrite"},
 }
@@ -249,10 +252,164 @@ def _safe_remote_path(raw: str) -> str:
     components = original.replace("\\", "/").split("/")
     if original in {".", ".."} or any(part in {"..", "."} for part in components):
         raise ValueError("OneDrive path cannot contain traversal.")
-    value = original.rstrip("/")
+    value = original.replace("\\", "/").rstrip("/")
     if not value:
         raise ValueError("A relative OneDrive path is required.")
     return value
+
+
+
+def _upload_sessions() -> dict:
+    cache = _load_cache()
+    sessions = cache.get("upload_sessions", {})
+    return sessions if isinstance(sessions, dict) else {}
+
+
+def _store_upload_session(upload_id: str, session: dict) -> None:
+    cache = _load_cache()
+    sessions = cache.get("upload_sessions", {})
+    if not isinstance(sessions, dict):
+        sessions = {}
+    sessions[upload_id] = session
+    cache["upload_sessions"] = sessions
+    _save_cache(cache)
+
+
+def _delete_upload_session(upload_id: str) -> None:
+    cache = _load_cache()
+    sessions = cache.get("upload_sessions", {})
+    if isinstance(sessions, dict):
+        sessions.pop(upload_id, None)
+        cache["upload_sessions"] = sessions
+        _save_cache(cache)
+
+
+def _session_offset(session: dict) -> int:
+    ranges = session.get("nextExpectedRanges") or ["0-"]
+    try:
+        return max(0, int(str(ranges[0]).split("-", 1)[0]))
+    except (ValueError, TypeError, IndexError):
+        return 0
+
+
+def _upload_session_transfer(upload_id: str, token: str) -> str:
+    session = _upload_sessions().get(upload_id)
+    if not isinstance(session, dict):
+        return "No resumable upload session was found in the OS credential vault. Start drive_upload again."
+
+    source_raw = str(session.get("source_path", ""))
+    remote = str(session.get("remote_path", ""))
+    try:
+        source = resolve_user_path(source_raw, roots=user_accessible_roots(), must_exist=True)
+        remote = _safe_remote_path(remote)
+    except (OSError, ValueError, PathPolicyError) as exc:
+        return f"Cannot resume this upload safely: {exc}"
+    if not source.is_file():
+        return "The original upload file is no longer available; the upload session was retained."
+    stat = source.stat()
+    if stat.st_size != int(session.get("size", -1)) or stat.st_mtime_ns != int(session.get("mtime_ns", -1)):
+        return "The local file changed since this upload session started. Start a new drive_upload with the current file."
+    upload_url = str(session.get("upload_url", ""))
+    if not upload_url.startswith("https://"):
+        _delete_upload_session(upload_id)
+        return "The saved upload session is invalid and was removed. Start drive_upload again."
+
+    requests = _requests()
+    try:
+        # The upload URL is a pre-authorized capability URL. Do not attach the
+        # Microsoft bearer token, log this URL, or return it to the model.
+        status_response = requests.get(upload_url, timeout=20)
+        if status_response.status_code in (404, 410):
+            _delete_upload_session(upload_id)
+            return "The OneDrive upload session expired. Start drive_upload again."
+        if status_response.status_code >= 400:
+            return f"Could not check resumable upload status (HTTP {status_response.status_code}); session retained for retry."
+        status_data = status_response.json()
+        session["nextExpectedRanges"] = status_data.get("nextExpectedRanges", session.get("nextExpectedRanges", ["0-"]))
+        _store_upload_session(upload_id, session)
+        offset = _session_offset(session)
+        total = source.stat().st_size
+        if offset >= total:
+            return f"Upload session {upload_id} reports no remaining bytes, but OneDrive did not confirm a completed item. Check OneDrive before starting a new upload."
+
+        with source.open("rb") as stream:
+            stream.seek(offset)
+            while offset < total:
+                chunk = stream.read(min(_UPLOAD_CHUNK_BYTES, total - offset))
+                if not chunk:
+                    return f"Upload paused unexpectedly at byte {offset}/{total}. Resume with operation=drive_upload_resume and upload_id={upload_id}."
+                end = offset + len(chunk) - 1
+                try:
+                    response = requests.put(
+                        upload_url,
+                        data=chunk,
+                        headers={
+                            "Content-Length": str(len(chunk)),
+                            "Content-Range": f"bytes {offset}-{end}/{total}",
+                        },
+                        timeout=(15, 120),
+                    )
+                except Exception as exc:
+                    return f"Upload paused at byte {offset}/{total} ({type(exc).__name__}). Session {upload_id} is retained; resume with operation=drive_upload_resume and upload_id={upload_id}."
+
+                if response.status_code in (200, 201):
+                    item = {}
+                    try:
+                        item = response.json()
+                    except ValueError:
+                        pass
+                    _delete_upload_session(upload_id)
+                    return f"Resumable upload completed: {item.get('name', Path(remote).name)} ({total} bytes) to OneDrive path '{remote}'."
+
+                if response.status_code == 202:
+                    try:
+                        response_data = response.json()
+                    except ValueError:
+                        response_data = {}
+                    session["nextExpectedRanges"] = response_data.get("nextExpectedRanges", [f"{end + 1}-"])
+                    _store_upload_session(upload_id, session)
+                    offset = _session_offset(session)
+                    stream.seek(offset)
+                    continue
+
+                if response.status_code in (404, 410):
+                    _delete_upload_session(upload_id)
+                    return "The OneDrive upload session expired or was cancelled. Start drive_upload again."
+                return (
+                    f"Upload paused at byte {offset}/{total}; OneDrive returned HTTP {response.status_code}. "
+                    f"Session {upload_id} is retained; resume with operation=drive_upload_resume and upload_id={upload_id}."
+                )
+    except Exception as exc:
+        return f"Resumable upload paused safely: {type(exc).__name__}: {str(exc)[:300]}. Session {upload_id} is retained; resume with operation=drive_upload_resume and upload_id={upload_id}."
+    return f"Upload did not reach a confirmed completion. Session {upload_id} is retained for resume."
+
+
+def _start_resumable_upload(source: Path, remote: str, token: str) -> str:
+    stat = source.stat()
+    upload_id = _digest(str(source.resolve()) + ":" + remote + ":" + str(stat.st_size) + ":" + str(stat.st_mtime_ns))
+    existing = _upload_sessions().get(upload_id)
+    if isinstance(existing, dict):
+        return _upload_session_transfer(upload_id, token)
+
+    endpoint = "/me/drive/root:/" + quote(remote, safe="/") + ":/createUploadSession"
+    data = _graph(
+        "POST", endpoint, token,
+        json_body={"item": {"@microsoft.graph.conflictBehavior": "fail"}},
+    )
+    upload_url = str(data.get("uploadUrl", ""))
+    if not upload_url.startswith("https://"):
+        return "Microsoft Graph did not return a valid resumable upload URL."
+    session = {
+        "source_path": str(source.resolve()),
+        "remote_path": remote,
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+        "upload_url": upload_url,
+        "expirationDateTime": data.get("expirationDateTime", ""),
+        "nextExpectedRanges": ["0-"],
+    }
+    _store_upload_session(upload_id, session)
+    return _upload_session_transfer(upload_id, token)
 
 
 def office_graph(parameters: dict, player=None, speak=None) -> str:
@@ -372,8 +529,6 @@ def office_graph(parameters: dict, player=None, speak=None) -> str:
             source = resolve_user_path(raw, roots=user_accessible_roots(), must_exist=True)
             if not source.is_file():
                 return "file_path must be an existing file."
-            if source.stat().st_size > _MAX_UPLOAD_BYTES:
-                return "Simple OneDrive upload is capped at 4 MiB in this implementation; resumable upload sessions are not yet implemented."
             token_path = "/me/drive/root:/" + quote(remote, safe="/")
             try:
                 _graph("GET", token_path + ":", token)
@@ -381,11 +536,36 @@ def office_graph(parameters: dict, player=None, speak=None) -> str:
             except RuntimeError as exc:
                 if "HTTP 404" not in str(exc):
                     raise
+            if source.stat().st_size > _MAX_UPLOAD_BYTES:
+                stat = source.stat()
+                upload_id = _digest(str(source.resolve()) + ":" + remote + ":" + str(stat.st_size) + ":" + str(stat.st_mtime_ns))
+                return request_confirmation(
+                    "office_graph:drive_upload_resumable:" + upload_id,
+                    "Upload large file to OneDrive",
+                    f"Create a resumable upload for {source.name} ({stat.st_size} bytes) at OneDrive path '{remote}'? Existing files are not overwritten. If interrupted, the session can be resumed.",
+                    lambda: _start_resumable_upload(source, remote, token),
+                    category="network", permissions=("network", "filesystem.read"),
+                )
             return request_confirmation(
                 "office_graph:drive_upload:" + _digest(str(source.resolve()) + ":" + remote),
                 "Upload file to OneDrive",
                 f"Upload {source.name} ({source.stat().st_size} bytes) to OneDrive path '{remote}'? Existing files are not overwritten.",
                 lambda: "Uploaded to OneDrive: " + str(_graph("PUT", token_path + ":/content", token, data=source.read_bytes(), headers={"Content-Type": "application/octet-stream"}).get("name", remote)),
+                category="network", permissions=("network", "filesystem.read"),
+            )
+
+        if operation == "drive_upload_resume":
+            upload_id = str(params.get("upload_id", "") or "").strip()
+            if not upload_id or not re.fullmatch(r"[a-f0-9]{24}", upload_id):
+                return "drive_upload_resume requires the upload_id returned by an interrupted drive_upload."
+            session = _upload_sessions().get(upload_id)
+            if not isinstance(session, dict):
+                return "No resumable upload session was found. It may have expired or already completed."
+            return request_confirmation(
+                "office_graph:drive_upload_resume:" + upload_id,
+                "Resume OneDrive upload",
+                f"Resume uploading {Path(str(session.get('source_path', 'file'))).name} to OneDrive path '{session.get('remote_path', '')}' using saved upload session {upload_id}?",
+                lambda: _upload_session_transfer(upload_id, token),
                 category="network", permissions=("network", "filesystem.read"),
             )
 
@@ -425,11 +605,11 @@ def office_graph(parameters: dict, player=None, speak=None) -> str:
 
 TOOL = {
     "name": "office_graph",
-    "description": "Connect Mark-LV to a personal Microsoft account using OAuth device-code sign-in, then read Outlook messages, create Outlook calendar events, inspect OneDrive, upload/download files, and list OneNote notebooks where Microsoft Graph supports the account. Email sending, event creation and uploads require explicit UI confirmation. Configure a public-client app ID first. General Microsoft Forms creation is not supported.",
+    "description": "Connect Mark-LV to a personal Microsoft account using OAuth device-code sign-in, then read Outlook messages, create Outlook calendar events, inspect OneDrive, upload/download files (large uploads support resumable sessions), and list OneNote notebooks where Microsoft Graph supports the account. Email sending, event creation and uploads require explicit UI confirmation. Configure a public-client app ID first. General Microsoft Forms creation is not supported.",
     "parameters": {
         "type": "OBJECT",
         "properties": {
-            "operation": {"type": "STRING", "description": "status | start_login | poll_login | profile | calendar_list | calendar_create | mail_list | mail_send | drive_list | drive_upload | drive_download | onenote_list | forms_create"},
+            "operation": {"type": "STRING", "description": "status | start_login | poll_login | profile | calendar_list | calendar_create | mail_list | mail_send | drive_list | drive_upload | drive_upload_resume | drive_download | onenote_list | forms_create"},
             "scope_set": {"type": "STRING", "description": "For start_login: all | profile | calendar | mail_read | mail_send | drive | onenote; defaults to all"},
             "start": {"type": "STRING", "description": "ISO 8601 start datetime for calendar_list/calendar_create"},
             "end": {"type": "STRING", "description": "ISO 8601 end datetime for calendar_list/calendar_create"},
@@ -440,6 +620,7 @@ TOOL = {
             "limit": {"type": "INTEGER", "description": "Maximum number of messages to list, 1-25"},
             "folder": {"type": "STRING", "description": "Optional OneDrive folder path relative to drive root"},
             "file_path": {"type": "STRING", "description": "Existing local file path for drive_upload"},
+            "upload_id": {"type": "STRING", "description": "Resume identifier returned by an interrupted large OneDrive upload"},
             "remote_path": {"type": "STRING", "description": "OneDrive path relative to root for upload/download"},
             "output_dir": {"type": "STRING", "description": "Optional local download folder inside home or OS temporary directory"},
             "filename": {"type": "STRING", "description": "Optional local download filename"}

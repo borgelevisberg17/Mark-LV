@@ -80,7 +80,11 @@ wmi;        sys_platform == "win32"
 pywinauto;  sys_platform == "win32"
 
 # ── Documents, media & hardware readouts ──────────────────────────────────────
+# DOCX-to-PDF uses LibreOffice or (on Windows) installed Microsoft Word + pywin32.
+# Scanned PDF OCR also needs the separate Tesseract OCR executable installed on the OS.
 keyring>=25,<27              # office_graph — OS credential vault for delegated tokens
+pymupdf>=1.24,<2              # document_conversion — render PDF pages for OCR
+pytesseract>=0.3.10,<1        # document_conversion — OCR bridge to the Tesseract executable
 reportlab>=4,<5              # document_conversion — text-to-PDF export
 # Also try/except-guarded at the point of use. They are declared because a
 # feature that silently does nothing is worse than a slightly longer install.

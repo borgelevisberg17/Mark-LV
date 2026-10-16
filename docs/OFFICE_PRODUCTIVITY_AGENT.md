@@ -10,8 +10,8 @@ or filesystem authorization layer.
 - `office_spreadsheets`: create editable XLSX workbooks and inspect existing XLSX sheets.
 - `office_presentations`: create editable PPTX presentations from slide titles, body text and bullet lists.
 - `image_tools`: inspect image metadata, resize, convert and compress images locally.
-- `document_conversion`: export text to PDF with ReportLab and extract selectable PDF text with pdfplumber or PyPDF2.
-- `office_graph`: delegated Microsoft Graph device-code sign-in for personal Microsoft accounts; read Outlook messages, create calendar events, list OneDrive items, upload/download small files, and list OneNote notebooks where the account/API supports it. Sending mail, creating events and uploading files request explicit UI confirmation.
+- `document_conversion`: export text to PDF with ReportLab, convert DOCX to PDF through LibreOffice or Windows Microsoft Word, extract selectable PDF text with pdfplumber or PyPDF2, and OCR scanned PDFs with PyMuPDF + pytesseract + the separately installed Tesseract engine.
+- `office_graph`: delegated Microsoft Graph device-code sign-in for personal Microsoft accounts; read Outlook messages, create calendar events, list OneDrive items, upload/download files, and list OneNote notebooks where the account/API supports it. Uploads larger than 4 MiB use Microsoft Graph upload sessions with chunked transfer and resumable progress saved in the OS credential vault. Sending mail, creating events and uploads request explicit UI confirmation.
 
 New outputs are created under `~/Documents/MarkLV` by default. The user may provide
 another directory inside their home folder or the operating system temporary
@@ -44,24 +44,53 @@ python -m pip install requests keyring
 ```
 
 Ensure Windows Credential Manager or another secure OS credential vault is available.
-Launch Mark-LV and call `office_graph` with `operation=start_login`. Open the verification
-URL shown by the action, enter the device code in the Microsoft page, and then call
-`office_graph` with `operation=poll_login`. A real sign-in is not considered validated
-until the action reports success and a read-only `profile` request succeeds.
+Launch Mark-LV and use **Setup → Microsoft 365 Sign In**, or call `office_graph` with
+`operation=start_login`. Open the verification URL shown by the action, enter the device
+code in the Microsoft page, and then check the login in the UI or call `office_graph` with
+`operation=poll_login`. A real sign-in is not considered validated until the action reports
+success and a read-only `profile` request succeeds.
 
 The implementation requests delegated Graph scopes, stores tokens in the OS credential
 vault, refreshes access tokens when possible, and never writes tokens to source or audit
 logs. Some account/API features may be unavailable; errors are surfaced instead of
 simulated. General Microsoft Forms creation is intentionally unsupported.
 
-## Explicit limitations
+## Conversion, OCR and large-upload setup
 
-- DOCX-to-PDF conversion is not implemented by this phase.
-- PDF OCR for scanned/image-only PDFs is not implemented.
+### DOCX to PDF
+
+Call document_conversion with operation=docx_to_pdf and file_path set to an existing
+.docx file. The action first looks for soffice/libreoffice on PATH. On Windows it then
+falls back to installed Microsoft Word via COM (using the pywin32 dependency). If neither
+converter is installed, it reports the missing prerequisite instead of producing a fake
+PDF. Outputs use a unique filename and do not overwrite an existing document.
+
+### OCR for scanned PDFs
+
+Call document_conversion with operation=ocr_pdf, file_path, and optionally
+language=eng+por, max_pages=20, save=true, and output_dir. Python packages are listed in
+requirements.txt; install the Tesseract OCR application separately and make sure its
+executable is on PATH. The action rejects PDFs above 50 MiB, defaults to at most 20 pages,
+caps requests at 100 pages, and uses a per-page OCR timeout. OCR quality and supported
+languages depend on the installed Tesseract language data. For PDFs that already contain
+selectable text, prefer operation=extract_pdf_text.
+
+### Resumable OneDrive uploads
+
+office_graph keeps the simple upload route for files up to 4 MiB. Larger files use Microsoft
+Graph upload sessions and 5 MiB chunks. The session URL (a bearer-capability URL) and transfer
+metadata are kept in the operating-system credential vault, not source code, logs, or the
+assistant response. If transfer pauses, use the returned upload_id with
+operation=drive_upload_resume; resuming also requires explicit confirmation. The original
+local file must still exist and retain the same size and modification timestamp. Upload
+sessions expire on Microsoft's side, so an expired session must be restarted. The destination
+is not intentionally overwritten.
+
+## Remaining limitations
+
 - EPUB generation creates a basic single-chapter ebook; it is not a full publishing
   workflow with advanced typography, cover generation, metadata editor or TOC builder.
 - Microsoft Forms general form creation is not represented as a working feature.
 - UI automation is not silently substituted for an unsupported API.
 - Email sending, event creation, file sharing, deletion and other remote side effects
-  are not implemented here; when added, they must use explicit authorization and
-  confirmation for consequential actions.
+  require explicit authorization and confirmation for consequential actions.
