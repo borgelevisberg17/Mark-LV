@@ -89,7 +89,7 @@ is not intentionally overwritten.
 
 ## Remaining limitations
 
-- EPUB output receives built-in package and internal-reference validation, but commercial release should also run the official [EPUBCheck](https://www.w3.org/publishing/epubcheck/) validator. Built-in checks are not full standards conformance validation and do not provide advanced typesetting or all publishing-platform metadata.
+- EPUB output receives built-in package and internal-reference validation. If the official [EPUBCheck](https://www.w3.org/publishing/epubcheck/) CLI is installed and available on PATH, the action runs it automatically and rejects a non-zero result or timeout. If it is unavailable, the result explicitly reports structural validation only; built-in checks are not full standards conformance validation and do not provide advanced typesetting or all publishing-platform metadata.
 - Word TOC insertion creates a field; Microsoft Word (or a compatible editor) must update the field to calculate final page numbers.
 - DOCX replacement spans run boundaries while preserving unaffected run formatting. The replacement text inherits the first matched run's formatting; editing tracked changes, text boxes, footnotes, equations and all other uncommon Word story parts is not guaranteed.
 - XLSX/XLSM edits fail closed when chart/drawing/pivot/external-link/embedded package parts are detected, unless the user explicitly authorizes possible feature loss. Formula results are calculated by Excel, not by openpyxl. For XLSM, VBA preservation is supported where openpyxl can retain it, but business-critical workbooks still require Excel validation.
