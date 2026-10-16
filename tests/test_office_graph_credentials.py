@@ -35,10 +35,12 @@ class FakeWindowsCredentialStore:
 
 class MicrosoftCredentialStorageTests(unittest.TestCase):
     def setUp(self):
+        office_graph._PENDING_FLOW = None
         self.store = FakeWindowsCredentialStore()
         self.patch_keyring = patch.object(office_graph, "_keyring", return_value=self.store)
         self.patch_keyring.start()
         self.addCleanup(self.patch_keyring.stop)
+        self.addCleanup(setattr, office_graph, "_PENDING_FLOW", None)
 
     def test_large_token_cache_round_trips_under_windows_blob_limit(self):
         cache = {
