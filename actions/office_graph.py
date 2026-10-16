@@ -89,22 +89,96 @@ def _keyring():
         raise RuntimeError("Secure token storage requires keyring. Install it with: pip install keyring") from exc
 
 
+# Windows Credential Manager limits each credential blob to 2,560 bytes.
+# Microsoft access/refresh tokens and resumable-upload metadata can exceed that
+# limit when serialized together. Store bounded chunks under separate entries,
+# then atomically switch a small manifest to the new generation.
+_CREDENTIAL_CHUNK_CHARS = 1800
+_CREDENTIAL_CHUNK_PREFIX = _CREDENTIAL_USERNAME + ":chunk:"
+
+
 def _load_cache() -> dict:
-    raw = _keyring().get_password(_CREDENTIAL_SERVICE, _CREDENTIAL_USERNAME)
+    keyring = _keyring()
+    raw = keyring.get_password(_CREDENTIAL_SERVICE, _CREDENTIAL_USERNAME)
     if not raw:
         return {}
     try:
-        data = json.loads(raw)
-        return data if isinstance(data, dict) else {}
-    except (ValueError, TypeError):
+        manifest = json.loads(raw)
+        if not isinstance(manifest, dict):
+            return {}
+        if manifest.get("_marklv_chunked") == 1:
+            generation = str(manifest.get("generation", ""))
+            count = int(manifest.get("chunks", 0))
+            if not generation or count < 1 or count > 10000:
+                return {}
+            pieces = []
+            for index in range(count):
+                piece = keyring.get_password(
+                    _CREDENTIAL_SERVICE,
+                    f"{_CREDENTIAL_CHUNK_PREFIX}{generation}:{index}",
+                )
+                if piece is None:
+                    return {}
+                pieces.append(piece)
+            data = json.loads("".join(pieces))
+            return data if isinstance(data, dict) else {}
+        # Backward compatibility with cache entries written by older versions.
+        return manifest
+    except (ValueError, TypeError, OverflowError):
         return {}
 
 
 def _save_cache(cache: dict) -> None:
-    _keyring().set_password(
-        _CREDENTIAL_SERVICE, _CREDENTIAL_USERNAME,
-        json.dumps(cache, separators=(",", ":")),
+    keyring = _keyring()
+    serialized = json.dumps(cache, separators=(",", ":"), ensure_ascii=True)
+    generation = hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:16]
+    chunks = [
+        serialized[i:i + _CREDENTIAL_CHUNK_CHARS]
+        for i in range(0, len(serialized), _CREDENTIAL_CHUNK_CHARS)
+    ] or ["{}"]
+
+    previous_manifest = None
+    previous_raw = keyring.get_password(_CREDENTIAL_SERVICE, _CREDENTIAL_USERNAME)
+    if previous_raw:
+        try:
+            parsed = json.loads(previous_raw)
+            if isinstance(parsed, dict) and parsed.get("_marklv_chunked") == 1:
+                previous_manifest = parsed
+        except (ValueError, TypeError):
+            pass
+
+    # Write all new pieces first. Every credential blob stays below the
+    # Windows Credential Manager limit, even when the full cache is much larger.
+    for index, chunk in enumerate(chunks):
+        keyring.set_password(
+            _CREDENTIAL_SERVICE,
+            f"{_CREDENTIAL_CHUNK_PREFIX}{generation}:{index}",
+            chunk,
+        )
+
+    keyring.set_password(
+        _CREDENTIAL_SERVICE,
+        _CREDENTIAL_USERNAME,
+        json.dumps({
+            "_marklv_chunked": 1,
+            "generation": generation,
+            "chunks": len(chunks),
+        }, separators=(",", ":")),
     )
+
+    # Only remove the previous generation after the new manifest is committed.
+    if previous_manifest:
+        old_generation = str(previous_manifest.get("generation", ""))
+        old_count = int(previous_manifest.get("chunks", 0))
+        if old_generation and old_generation != generation and 0 <= old_count <= 10000:
+            for index in range(old_count):
+                try:
+                    keyring.delete_password(
+                        _CREDENTIAL_SERVICE,
+                        f"{_CREDENTIAL_CHUNK_PREFIX}{old_generation}:{index}",
+                    )
+                except Exception:
+                    pass
 
 
 def _start_login(scope_set: str) -> str:
