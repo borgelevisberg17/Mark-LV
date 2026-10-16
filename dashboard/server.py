@@ -640,7 +640,7 @@ class DashboardServer:
                 )
             now = time.time()
             if not key or key not in self._pending_keys or self._pending_keys[key] <= now:
-                _login_failure(identity, "Invalid or expired key")
+                blocked = self._login_limiter.record_failure(identity)
                 return HTMLResponse("""<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width">
 <style>
@@ -650,7 +650,9 @@ class DashboardServer:
 </style></head>
 <body><div><h2>Link Expired</h2>
 <p>Press <strong style="color:#dde3ed">Remote Control</strong> in JARVIS to get a new QR code.</p>
-</div></body></html>""")
+</div></body></html>""",
+                    status_code=429 if blocked else 401,
+                    headers={"Retry-After": "120"} if blocked else None)
 
             self._login_limiter.record_success(identity)
             del self._pending_keys[key]
