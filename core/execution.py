@@ -66,7 +66,7 @@ def request_execution(
 
 def _validate_timeout(timeout: int | float | None) -> int:
     try:
-        value = int(timeout or DEFAULT_TIMEOUT_SECONDS)
+        value = DEFAULT_TIMEOUT_SECONDS if timeout is None else int(timeout)
     except (TypeError, ValueError) as exc:
         raise ExecutionPolicyError("Timeout must be an integer between 1 and 300 seconds.") from exc
     if not 1 <= value <= MAX_TIMEOUT_SECONDS:
