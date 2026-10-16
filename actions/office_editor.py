@@ -468,7 +468,7 @@ def _create_epub(params: dict) -> str:
     if not title:
         raise ValueError("title is required.")
     for label, value in (("title", title), ("author", author), ("language", language), ("description", description)):
-        if re.search(r"[\\x00-\\x08\\x0b\\x0c\\x0e-\\x1f]", value):
+        if re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", value):
             raise ValueError(f"{label} contains characters not allowed in XML.")
     if not isinstance(chapters, list) or not chapters or len(chapters) > 100:
         raise ValueError("chapters must be a list of 1–100 chapter objects.")
@@ -495,14 +495,14 @@ def _create_epub(params: dict) -> str:
         filename = f"chapter-{index:03d}.xhtml"
         chapter_title = chapter["title"].strip() or f"Chapter {index}"
         content = chapter["content"]
-        if re.search(r"[\\x00-\\x08\\x0b\\x0c\\x0e-\\x1f]", chapter_title + content):
+        if re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", chapter_title + content):
             raise ValueError(f"Chapter {index} contains characters not allowed in XML.")
         blocks = []
         for paragraph in content.split("\n\n"):
             if paragraph.strip():
                 blocks.append("<p>" + html.escape(paragraph.strip()).replace("\n", "<br/>") + "</p>")
         xhtml = ('<?xml version="1.0" encoding="utf-8"?>'
-          '<html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><title>'
+          '<html xmlns="http://www.w3.org/1999/xhtml" lang="' + html.escape(language) + '"><head><title>'
           + html.escape(chapter_title) + '</title><meta charset="utf-8"/></head><body><h1>'
           + html.escape(chapter_title) + '</h1>' + "".join(blocks) + '</body></html>')
         entries[f"OEBPS/{filename}"] = xhtml
