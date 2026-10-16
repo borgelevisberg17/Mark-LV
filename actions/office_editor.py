@@ -9,6 +9,8 @@ import html
 import os
 from copy import copy
 import re
+import shutil
+import subprocess
 import uuid
 import zipfile
 from pathlib import Path
@@ -549,6 +551,29 @@ def _pptx_edit(params: dict) -> str:
     return f"Edited presentation: {result_path}\n{summary}\nValidation: reopened successfully; {len(check.slides)} slides."
 
 
+def _run_epubcheck(path: Path) -> str:
+    """Run official EPUBCheck when available; never invoke it through a shell."""
+    executable = shutil.which("epubcheck")
+    if not executable:
+        return "EPUBCheck not installed; structural validation only"
+    try:
+        completed = subprocess.run(
+            [executable, str(path)],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError("EPUBCheck exceeded the 120-second validation timeout.") from exc
+    output = "\\n".join(part.strip() for part in (completed.stdout, completed.stderr) if part.strip())
+    if completed.returncode != 0:
+        detail = output[-2000:] if output else "No diagnostic output was returned."
+        raise ValueError(f"EPUBCheck rejected the publication (exit {completed.returncode}): {detail}")
+    return "EPUBCheck passed" + (f": {output[-500:]}" if output else "")
+
+
 def _create_epub(params: dict) -> str:
     title = str(params.get("title", "")).strip()
     author = str(params.get("author", "Mark-LV")).strip() or "Mark-LV"
@@ -636,10 +661,11 @@ def _create_epub(params: dict) -> str:
             for name, value in entries.items():
                 book.writestr(name, value, compress_type=zipfile.ZIP_DEFLATED)
         _validate_epub_package(temporary)
+        epubcheck_status = _run_epubcheck(temporary)
         os.replace(temporary, output)
     finally:
         temporary.unlink(missing_ok=True)
-    return f"Created structured EPUB: {output}\nChapters: {len(chapters)}\nCover: {'included' if cover_path else 'not provided'}\nValidation: package and navigation XML reopened successfully."
+    return f"Created structured EPUB: {output}\nChapters: {len(chapters)}\nCover: {'included' if cover_path else 'not provided'}\nValidation: package/XML/internal links passed; {epubcheck_status}."
 
 
 def office_editor(parameters: dict, player=None, speak=None) -> str:
@@ -674,7 +700,7 @@ TOOL = {
         "Existing source files are preserved by default and an edited copy is created. Only set in_place=true when the user explicitly asks to overwrite the source. "
         "DOCX replacements preserve unaffected run formatting and search supported body, table, header and footer paragraphs. "
         "XLSX/XLSM supports literal cell edits, explicit formulas, formatting, row append and sheet create/rename; it refuses charts, drawings, pivots, external links and embedded parts by default because openpyxl may drop them. "
-        "PPTX replacement clears stale paragraphs and retains first-paragraph formatting. EPUB output validates XML, manifest/spine and local links. "
+        "PPTX replacement clears stale paragraphs and retains first-paragraph formatting. EPUB output validates XML, manifest/spine and local links, and runs official EPUBCheck automatically when installed. "
         "Use exact local file_path values; source files are copied by default."
     ),
     "parameters": {
