@@ -32,6 +32,22 @@ class ConfirmationAndUndoTests(unittest.TestCase):
         self.assertEqual(ran, [])
         self.assertTrue(hidden)
 
+    def test_second_confirmation_cannot_replace_pending_action(self):
+        shown = []
+        confirm.bind(lambda title, detail: shown.append(title), lambda: None)
+        first_ran = []
+        second_ran = []
+        first = confirm.request("first", "First action", "First detail",
+                                lambda: first_ran.append(True) or "done")
+        second = confirm.request("second", "Second action", "Second detail",
+                                 lambda: second_ran.append(True) or "done")
+        self.assertIn("CONFIRMATION_PENDING", first)
+        self.assertIn("already a confirmation waiting", second)
+        self.assertEqual(shown, ["First action"])
+        confirm.resolve(False)
+        self.assertEqual(first_ran, [])
+        self.assertEqual(second_ran, [])
+
     def test_undo_reverses_latest_registered_operation(self):
         state = {"value": 1}
         state["value"] = 2
