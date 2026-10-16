@@ -9,6 +9,8 @@ import shutil
 import subprocess
 import threading
 import webbrowser
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Optional
 
@@ -36,6 +38,52 @@ def _normalize_url(url: str) -> str:
     if "." not in url:
         url = url + ".com"
     return "https://" + url
+
+
+def _browser_process_running(browser: str) -> bool:
+    """Return whether the requested browser already has a running process."""
+    process_names = {
+        "chrome": ("chrome.exe", "google-chrome", "chromium"),
+        "edge": ("msedge.exe", "msedge", "microsoft-edge"),
+        "firefox": ("firefox.exe", "firefox"),
+        "brave": ("brave.exe", "brave"),
+        "vivaldi": ("vivaldi.exe", "vivaldi"),
+        "opera": ("opera.exe", "opera"),
+        "operagx": ("opera.exe", "opera"),
+    }.get(browser.lower(), ())
+
+    if not process_names:
+        return False
+
+    try:
+        if _OS == "Windows":
+            result = subprocess.run(
+                ["tasklist", "/FO", "CSV", "/NH"],
+                capture_output=True, text=True, timeout=5, check=False,
+            )
+            running = result.stdout.lower()
+        else:
+            result = subprocess.run(
+                ["ps", "-A", "-o", "comm="],
+                capture_output=True, text=True, timeout=5, check=False,
+            )
+            running = result.stdout.lower()
+        return any(name.lower() in running for name in process_names)
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _find_cdp_endpoint() -> Optional[str]:
+    """Find a local Chromium remote-debugging endpoint, if one is exposed."""
+    for port in (9222, 9223, 9224, 9225):
+        endpoint = f"http://127.0.0.1:{port}"
+        try:
+            with urllib.request.urlopen(f"{endpoint}/json/version", timeout=0.35) as response:
+                if response.status == 200:
+                    return endpoint
+        except (OSError, urllib.error.URLError, TimeoutError):
+            continue
+    return None
 
 
 def _user_agent() -> str:
@@ -570,6 +618,33 @@ class _BrowserSession:
             self._page = await self._adopt_page()
             print(f"[Browser] ✅ Safari launched")
             return
+
+        # Never launch a second process against a browser profile that is
+        # already in use. If the existing Chromium browser exposes CDP, attach
+        # to it; otherwise stop with a clear message instead of opening a
+        # duplicate browser/profile or silently switching to another profile.
+        if engine_name == "chromium" and _browser_process_running(self.browser_name):
+            cdp_endpoint = _find_cdp_endpoint()
+            if cdp_endpoint:
+                browser = await engine_obj.connect_over_cdp(cdp_endpoint)
+                if not browser.contexts:
+                    raise RuntimeError(
+                        f"{self.browser_name} is running at {cdp_endpoint}, but no browser context is available."
+                    )
+                self._context = browser.contexts[0]
+                self._page = await self._adopt_page()
+                print(
+                    f"[Browser] Attached to existing [{self.browser_name}] "
+                    f"session via {cdp_endpoint}"
+                )
+                return
+            raise RuntimeError(
+                f"{self.browser_name} is already open. Mark-LV did not start another "
+                "instance because the existing browser does not expose a supported "
+                "automation connection. To control that session, start the browser "
+                "with remote debugging enabled; otherwise close it first or explicitly "
+                "request a separate automation browser."
+            )
 
         profile = _real_profile_dir(self.browser_name)
 
