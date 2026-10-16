@@ -716,7 +716,7 @@ def _process_video(path: Path, action: str, params: dict, speak=None) -> str:
     return f"Unknown video action: '{action}'. Try: info, trim, extract_audio, extract_frame, compress, transcribe, convert"
 
 def _safe_archive_target(destination: Path, member_name: str) -> Path:
-    raw = member_name.replace("\\\\", "/")
+    raw = member_name.replace(chr(92), "/")
     while raw.startswith("./"):
         raw = raw[2:]
     raw = raw.rstrip("/")
@@ -816,11 +816,19 @@ def _process_archive(path: Path, action: str, params: dict, speak=None) -> str:
     if action == "extract":
         raw_destination = params.get("destination") or str(path.parent / path.stem)
         try:
-            dest = resolve_user_path(
-                raw_destination,
-                base=path.parent,
-                roots=user_accessible_roots(),
-            )
+            raw_destination_text = str(raw_destination)
+            destination_path = Path(raw_destination_text).expanduser()
+            if destination_path.is_absolute():
+                dest = resolve_user_path(
+                    destination_path,
+                    roots=user_accessible_roots(),
+                )
+            else:
+                dest = resolve_child_path(
+                    path.parent,
+                    raw_destination_text,
+                    roots=user_accessible_roots(),
+                )
             if dest == path or (dest.exists() and dest.is_file()):
                 return "Extraction destination must be a directory, not a file."
             dest.mkdir(parents=True, exist_ok=True)
