@@ -148,7 +148,7 @@ class OfficeEditorTests(unittest.TestCase):
         deck = Presentation()
         slide = deck.slides.add_slide(deck.slide_layouts[6])
         shape = slide.shapes.add_textbox(0, 0, 5000000, 1000000)
-        shape.text_frame.text = "Old first line\\nOld second line"
+        shape.text_frame.text = "Old first line\nOld second line"
         deck.save(source)
         result = office_editor.office_editor({
             "operation": "replace_shape_text", "file_path": str(source),
@@ -185,7 +185,7 @@ class OfficeEditorTests(unittest.TestCase):
 
     def test_multichapter_epub_has_navigation_and_valid_package(self):
         result = office_editor.office_editor({
-            "operation": "create_epub", "title": "Livro de teste",
+            "operation": "create_epub", "title": "Livro de teste", "author": "Autora de teste", "language": "pt-AO", "description": "Descrição do livro",
             "output_dir": str(self.docs),
             "chapters": [
                 {"title": "Introdução", "content": "Primeiro parágrafo.\n\nSegundo parágrafo."},
@@ -200,6 +200,10 @@ class OfficeEditorTests(unittest.TestCase):
             self.assertIsNone(book.testzip())
             self.assertIn(b"Introdu\xc3\xa7\xc3\xa3o", book.read("OEBPS/nav.xhtml"))
             self.assertIn("OEBPS/chapter-002.xhtml", book.namelist())
+            opf = book.read("OEBPS/content.opf")
+            self.assertIn(b"Autora de teste", opf)
+            self.assertIn(b"pt-AO", opf)
+            self.assertIn(b"Descri", opf)
 
     def test_action_is_discoverable_by_existing_registry(self):
         from core.action_loader import discover_actions
