@@ -82,17 +82,96 @@ def _find_document_path(file_path: str, filename: str) -> Path:
     )
 
 
+def _convert_epub_to_docx(source: Path) -> Path:
+    """Create an editable DOCX copy from the generated EPUB without changing the EPUB."""
+    from xml.etree import ElementTree
+    from docx import Document
+    from docx.shared import Inches, Pt
+
+    if source.stat().st_size > 50 * 1024 * 1024:
+        raise ValueError("EPUB is larger than the 50 MB safe conversion limit.")
+    with zipfile.ZipFile(source, "r") as book:
+        if book.testzip() is not None:
+            raise zipfile.BadZipFile("EPUB contains a corrupt archive member.")
+        chapter_name = next(
+            (name for name in book.namelist()
+             if name.lower().endswith((".xhtml", ".html", ".htm"))
+             and "nav" not in Path(name).name.lower()),
+            None,
+        )
+        if not chapter_name:
+            raise ValueError("No readable XHTML chapter was found inside this EPUB.")
+        chapter_bytes = book.read(chapter_name)
+        if len(chapter_bytes) > 10 * 1024 * 1024:
+            raise ValueError("EPUB chapter is larger than the 10 MB safe conversion limit.")
+
+    root = ElementTree.fromstring(chapter_bytes)
+    title = ""
+    blocks = []
+    for node in root.iter():
+        tag = node.tag.rsplit("}", 1)[-1].lower()
+        if tag == "title" and not title:
+            title = "".join(node.itertext()).strip()
+        elif tag in {"h1", "h2", "h3", "h4", "p", "li", "blockquote"}:
+            text = " ".join("".join(node.itertext()).split())
+            if text:
+                blocks.append((tag, text))
+    if not title:
+        title = source.stem.replace("_", " ").replace("-", " ").strip() or "Ebook"
+    if not blocks:
+        raise ValueError("The EPUB chapter contains no readable text.")
+
+    output = unique_output_path(
+        source.parent, safe_filename(source.stem, title, ".docx")
+    )
+    document = Document()
+    section = document.sections[0]
+    section.top_margin = Inches(0.8)
+    section.bottom_margin = Inches(0.8)
+    section.left_margin = Inches(0.9)
+    section.right_margin = Inches(0.9)
+    document.core_properties.title = title
+    document.core_properties.subject = "Editable copy converted from an EPUB by Mark-LV"
+    document.add_heading(title, level=0)
+    for tag, text in blocks:
+        if tag == "h1":
+            document.add_heading(text, level=1)
+        elif tag == "h2":
+            document.add_heading(text, level=2)
+        elif tag == "h3":
+            document.add_heading(text, level=3)
+        else:
+            document.add_paragraph(text)
+    document.styles["Normal"].font.name = "Aptos"
+    document.styles["Normal"].font.size = Pt(11)
+    document.save(output)
+    verified = Document(output)
+    if not verified.paragraphs or verified.paragraphs[0].text != title:
+        output.unlink(missing_ok=True)
+        raise ValueError("Converted DOCX failed validation.")
+    return output
+
+
 def _open_document_path(source: Path, app_name: str = "") -> str:
     """Open a validated document through its OS association, without UI key simulation."""
     requested_app = app_name.strip().casefold()
     suffix = source.suffix.casefold()
-    if requested_app in {"word", "microsoft word", "winword"} and suffix not in _WORD_EXTENSIONS:
-        if suffix == ".epub":
+    if requested_app in {"word", "microsoft word", "winword"} and suffix == ".epub":
+        try:
+            converted = _convert_epub_to_docx(source)
+        except ImportError as exc:
             return (
-                f"Cannot open {source.name} in Microsoft Word because Word does not natively "
-                "support EPUB. The EPUB file is intact; open it with an EPUB reader, or create "
-                "an editable .docx version with operation=create_docx."
+                f"Cannot convert {source.name} for Word because a document library is missing: {exc}. "
+                "Open the original EPUB with an EPUB reader instead."
             )
+        except (OSError, ValueError, zipfile.BadZipFile) as exc:
+            return f"Could not create an editable Word copy from {source.name}: {exc}"
+        open_result = _open_document_path(converted, "word")
+        return (
+            f"Created an editable Word copy from the EPUB. Original ebook preserved.\n"
+            f"{open_result}"
+        )
+    if requested_app in {"word", "microsoft word", "winword"} and suffix not in _WORD_EXTENSIONS:
         return (
             f"Microsoft Word is not the recommended handler for {suffix or 'this file type'}. "
             "Use the default application or request a supported Word document."
