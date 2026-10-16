@@ -34,4 +34,4 @@ jobs:
       - name: Install Office artifact libraries
         run: python -m pip install python-docx openpyxl python-pptx Pillow reportlab
       - name: Run Office artifact integration tests
-        run: python -m unittest tests/test_office_actions_integration.py -v
+        run: python -m unittest discover -s tests -p 'test_office_actions_integration.py' -v
