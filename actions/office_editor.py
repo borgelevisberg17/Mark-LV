@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import html
 import os
+from copy import copy
 import re
 import uuid
 import zipfile
@@ -354,6 +355,86 @@ def _xlsx_edit(params: dict) -> str:
                 if isinstance(value, str):
                     cell.data_type = "s"
             summary = f"Updated {len(cells)} cells in '{sheet_name}'."
+        elif operation == "set_formulas":
+            formulas = params.get("formulas")
+            if not isinstance(formulas, dict) or not formulas or len(formulas) > 1000:
+                raise ValueError("formulas must be a non-empty object of A1 addresses to formulas (max 1,000).")
+            for address, formula in formulas.items():
+                if not isinstance(address, str) or not re.fullmatch(r"[A-Za-z]{1,3}[1-9][0-9]{0,6}", address):
+                    raise ValueError(f"Invalid A1 cell address: {address}")
+                if not isinstance(formula, str) or not formula.startswith("=") or len(formula) > 8192:
+                    raise ValueError(f"Formula for {address} must be a string beginning with '=' and at most 8,192 characters.")
+                sheet[address.upper()] = formula
+            summary = f"Set {len(formulas)} formulas in '{sheet_name}'. Excel will calculate formula results when opened."
+        elif operation == "format_cells":
+            formats = params.get("formats")
+            if not isinstance(formats, dict) or not formats or len(formats) > 1000:
+                raise ValueError("formats must be a non-empty object of A1 addresses to style objects (max 1,000).")
+            allowed = {"bold", "italic", "font_size", "font_name", "font_color", "fill_color",
+                       "number_format", "horizontal_alignment", "wrap_text"}
+            alignments = {"general", "left", "center", "right", "fill", "justify", "centerContinuous", "distributed"}
+            from openpyxl.styles import Alignment, Font, PatternFill
+            for address, style in formats.items():
+                if not isinstance(address, str) or not re.fullmatch(r"[A-Za-z]{1,3}[1-9][0-9]{0,6}", address):
+                    raise ValueError(f"Invalid A1 cell address: {address}")
+                if not isinstance(style, dict) or not style or set(style) - allowed:
+                    raise ValueError(f"Formatting for {address} must use supported style properties only: {', '.join(sorted(allowed))}.")
+                cell = sheet[address.upper()]
+                font = copy(cell.font)
+                if "bold" in style:
+                    if not isinstance(style["bold"], bool):
+                        raise ValueError(f"bold for {address} must be boolean.")
+                    font.bold = style["bold"]
+                if "italic" in style:
+                    if not isinstance(style["italic"], bool):
+                        raise ValueError(f"italic for {address} must be boolean.")
+                    font.italic = style["italic"]
+                if "font_size" in style:
+                    size = style["font_size"]
+                    if isinstance(size, bool) or not isinstance(size, (int, float)) or not 1 <= size <= 72:
+                        raise ValueError(f"font_size for {address} must be between 1 and 72.")
+                    font.sz = size
+                if "font_name" in style:
+                    name = style["font_name"]
+                    if not isinstance(name, str) or not name.strip() or len(name) > 64:
+                        raise ValueError(f"font_name for {address} must be a non-empty string of at most 64 characters.")
+                    font.name = name
+                if "font_color" in style:
+                    color = style["font_color"]
+                    if not isinstance(color, str) or not re.fullmatch(r"(?:[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})", color):
+                        raise ValueError(f"font_color for {address} must be a 6- or 8-digit hexadecimal RGB/ARGB value.")
+                    font.color = color if len(color) == 8 else "FF" + color
+                cell.font = font
+                if "fill_color" in style:
+                    color = style["fill_color"]
+                    if not isinstance(color, str) or not re.fullmatch(r"(?:[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})", color):
+                        raise ValueError(f"fill_color for {address} must be a 6- or 8-digit hexadecimal RGB/ARGB value.")
+                    cell.fill = PatternFill(fill_type="solid", fgColor=color if len(color) == 8 else "FF" + color)
+                if "number_format" in style:
+                    number_format = style["number_format"]
+                    if not isinstance(number_format, str) or not number_format or len(number_format) > 64:
+                        raise ValueError(f"number_format for {address} must be a non-empty string of at most 64 characters.")
+                    cell.number_format = number_format
+                if "horizontal_alignment" in style:
+                    alignment = style["horizontal_alignment"]
+                    if alignment not in alignments:
+                        raise ValueError(f"Unsupported horizontal_alignment for {address}: {alignment}")
+                    cell.alignment = copy(cell.alignment)
+                    cell.alignment = Alignment(
+                        horizontal=alignment, vertical=cell.alignment.vertical,
+                        text_rotation=cell.alignment.textRotation, wrap_text=cell.alignment.wrap_text,
+                        shrink_to_fit=cell.alignment.shrink_to_fit, indent=cell.alignment.indent,
+                    )
+                if "wrap_text" in style:
+                    if not isinstance(style["wrap_text"], bool):
+                        raise ValueError(f"wrap_text for {address} must be boolean.")
+                    cell.alignment = copy(cell.alignment)
+                    cell.alignment = Alignment(
+                        horizontal=cell.alignment.horizontal, vertical=cell.alignment.vertical,
+                        text_rotation=cell.alignment.textRotation, wrap_text=style["wrap_text"],
+                        shrink_to_fit=cell.alignment.shrink_to_fit, indent=cell.alignment.indent,
+                    )
+            summary = f"Applied formatting to {len(formats)} cells in '{sheet_name}'."
         elif operation == "append_rows":
             rows = params.get("rows")
             if not isinstance(rows, list) or not rows or len(rows) > 10000:
@@ -376,6 +457,15 @@ def _xlsx_edit(params: dict) -> str:
                 raise ValueError(f"Worksheet already exists: {name}")
             workbook.create_sheet(name)
             summary = f"Created worksheet '{name}'."
+        elif operation == "rename_sheet":
+            new_name = str(params.get("new_sheet_name", "")).strip()
+            if not new_name or len(new_name) > 31 or any(char in new_name for char in r'[]:*?/\\'):
+                raise ValueError("new_sheet_name must be 1–31 characters and cannot contain []:*?/\\.")
+            if new_name in workbook.sheetnames and new_name != sheet_name:
+                raise ValueError(f"Worksheet already exists: {new_name}")
+            workbook[sheet_name].title = new_name
+            sheet_name = new_name
+            summary = f"Renamed worksheet to '{new_name}'."
         else:
             raise ValueError(f"Unsupported XLSX operation: {operation}")
         def writer(temp):
@@ -558,7 +648,7 @@ def office_editor(parameters: dict, player=None, speak=None) -> str:
     try:
         if operation in {"replace_text", "append_content", "add_toc", "add_references", "insert_cover"}:
             return _docx_edit(params)
-        if operation in {"set_cells", "append_rows", "add_sheet"}:
+        if operation in {"set_cells", "set_formulas", "format_cells", "append_rows", "add_sheet", "rename_sheet"}:
             return _xlsx_edit(params)
         if operation in {"replace_shape_text", "append_slides"}:
             return _pptx_edit(params)
@@ -580,17 +670,17 @@ TOOL = {
         "Advanced editing for existing Word DOCX, Excel XLSX/XLSM, and PowerPoint PPTX files, "
         "plus structured multi-chapter EPUB publishing with metadata and structural validation. Operations: replace_text across DOCX runs, "
         "append_content (paragraphs/headings/bullets/numbers/page breaks), add_toc (inserts a Word TOC field; user must update it in Word), "
-        "add_references, insert_cover, set_cells, append_rows, add_sheet, replace_shape_text, append_slides, create_epub. "
+        "add_references, insert_cover, set_cells, set_formulas, format_cells, append_rows, add_sheet, rename_sheet, replace_shape_text, append_slides, create_epub. "
         "Existing source files are preserved by default and an edited copy is created. Only set in_place=true when the user explicitly asks to overwrite the source. "
         "DOCX replacements preserve unaffected run formatting and search supported body, table, header and footer paragraphs. "
-        "XLSX/XLSM editing refuses charts, drawings, pivots, external links and embedded parts by default because openpyxl may drop them. "
+        "XLSX/XLSM supports literal cell edits, explicit formulas, formatting, row append and sheet create/rename; it refuses charts, drawings, pivots, external links and embedded parts by default because openpyxl may drop them. "
         "PPTX replacement clears stale paragraphs and retains first-paragraph formatting. EPUB output validates XML, manifest/spine and local links. "
         "Use exact local file_path values; source files are copied by default."
     ),
     "parameters": {
         "type": "OBJECT",
         "properties": {
-            "operation": {"type": "STRING", "description": "replace_text | append_content | add_toc | add_references | insert_cover | set_cells | append_rows | add_sheet | replace_shape_text | append_slides | create_epub"},
+            "operation": {"type": "STRING", "description": "replace_text | append_content | add_toc | add_references | insert_cover | set_cells | set_formulas | format_cells | append_rows | add_sheet | rename_sheet | replace_shape_text | append_slides | create_epub"},
             "file_path": {"type": "STRING", "description": "Existing DOCX/XLSX/XLSM/PPTX source file path"},
             "in_place": {"type": "BOOLEAN", "description": "Default false: save a new edited copy and preserve source. Set true only with explicit user authorization to overwrite."},
             "allow_unsupported_features": {"type": "BOOLEAN", "description": "XLSX/XLSM only: accept possible loss of chart, drawing, pivot, external-link or embedded features. Never set without explicit user authorization to accept that risk."},
@@ -604,7 +694,9 @@ TOOL = {
             "image_path": {"type": "STRING", "description": "insert_cover: local PNG or JPEG cover image path"},
             "cover_title": {"type": "STRING", "description": "insert_cover: optional title to place on the cover"},
             "sheet_name": {"type": "STRING", "description": "XLSX: target sheet name; defaults to active sheet"},
-            "cells": {"type": "OBJECT", "description": "set_cells: mapping of A1 cell addresses to scalar values"},
+            "cells": {"type": "OBJECT", "description": "set_cells: mapping of A1 cell addresses to scalar values; strings remain literal text, not formulas"},
+            "formulas": {"type": "OBJECT", "description": "set_formulas: mapping of A1 cell addresses to Excel formulas beginning with '='"},
+            "formats": {"type": "OBJECT", "description": "format_cells: mapping of A1 cell addresses to style objects using bold, italic, font_size, font_name, font_color, fill_color, number_format, horizontal_alignment, wrap_text"},
             "rows": {"type": "ARRAY", "items": {"type": "ARRAY", "items": {"type": "STRING"}}, "description": "append_rows: row arrays to append"},
             "new_sheet_name": {"type": "STRING", "description": "add_sheet: new worksheet name"},
             "slide_index": {"type": "INTEGER", "description": "replace_shape_text: zero-based slide index"},
