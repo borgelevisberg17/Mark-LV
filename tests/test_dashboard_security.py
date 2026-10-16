@@ -1,6 +1,6 @@
 import unittest
 
-from dashboard.security import LoginAttemptLimiter, SessionTokenRegistry
+from dashboard.security import LoginAttemptLimiter, SessionTokenRegistry, websocket_origin_matches_host
 
 
 class FakeClock:
@@ -12,6 +12,18 @@ class FakeClock:
 
     def advance(self, seconds):
         self.now += seconds
+
+
+class WebSocketOriginTests(unittest.TestCase):
+    def test_accepts_matching_http_and_https_hosts(self):
+        self.assertTrue(websocket_origin_matches_host("http://192.0.2.4:8000", "192.0.2.4:8000"))
+        self.assertTrue(websocket_origin_matches_host("https://dashboard.local:8001", "dashboard.local:8001"))
+
+    def test_rejects_cross_site_missing_and_malformed_origins(self):
+        self.assertFalse(websocket_origin_matches_host("https://attacker.example", "192.0.2.4:8000"))
+        self.assertFalse(websocket_origin_matches_host("", "192.0.2.4:8000"))
+        self.assertFalse(websocket_origin_matches_host("not a url", "192.0.2.4:8000"))
+        self.assertFalse(websocket_origin_matches_host("ftp://192.0.2.4:8000", "192.0.2.4:8000"))
 
 
 class SessionTokenRegistryTests(unittest.TestCase):
