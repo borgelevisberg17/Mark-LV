@@ -110,13 +110,20 @@ async function perform(command) {
     await chrome.tabs.update(tab.id, {url});
     return "Navigated existing Edge tab to " + url;
   }
-  if (action === "back" || action === "forward" || action === "reload" || action === "close_tab") {
+  if (action === "reload" || action === "close_tab") {
     const tab = await activeTab();
-    if (action === "back") await chrome.tabs.goBack(tab.id);
-    else if (action === "forward") await chrome.tabs.goForward(tab.id);
-    else if (action === "reload") await chrome.tabs.reload(tab.id);
+    if (action === "reload") await chrome.tabs.reload(tab.id);
     else await chrome.tabs.remove(tab.id);
-    return action === "close_tab" ? "Closed active tab." : action + " completed.";
+    return action === "close_tab" ? "Closed active tab." : "Reload completed.";
+  }
+  if (action === "back" || action === "forward") {
+    const tab = await activeTab();
+    const [{result}] = await chrome.scripting.executeScript({
+      target: {tabId: tab.id},
+      func: direction => { if (direction === "back") history.back(); else history.forward(); return direction + " requested."; },
+      args: [action]
+    });
+    return String(result || action + " requested.");
   }
   const tab = await activeTab();
   const [{result}] = await chrome.scripting.executeScript({
