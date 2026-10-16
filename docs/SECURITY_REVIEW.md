@@ -29,14 +29,17 @@ penetration-test report or a claim that the application is fully secure.
 
 - The rate limiter is in-memory and resets when the process restarts. It is
   designed to slow repeated guessing, not to replace network-level protections.
-- Authentication tokens and paired-device sessions need a dedicated lifecycle
-  review, including expiration, revocation, and safe handling in browser storage.
+- Bearer tokens now expire server-side after eight hours and can be revoked through
+  the authenticated `POST /api/logout` endpoint. Expiry is enforced on HTTP and
+  WebSocket authentication; the registry is in-memory and resets on process restart.
+- Browser WebSocket connections must provide an `Origin` matching the request host,
+  reducing cross-site WebSocket hijacking risk.
 - The existing AES-CBC protocol needs a coordinated client/server migration to
   an authenticated encryption format such as AES-GCM; do not change only one
   side of that protocol.
-- The dashboard should be tested against CSRF, WebSocket origin, upload abuse,
-  token leakage, and concurrent requests before it is exposed beyond a trusted
-  LAN.
+- The dashboard should still be tested against CSRF, upload abuse, token leakage,
+  and concurrent requests before it is exposed beyond a trusted LAN. WebSocket
+  origin validation is a defense-in-depth check, not a substitute for TLS.
 - Plugin isolation requires a separate process boundary and a permissions model;
   validation of plugin metadata is not a sandbox.
 - The full desktop application and its OS-specific actions still require

@@ -18,7 +18,7 @@ import string
 import time
 from pathlib import Path
 
-from dashboard.security import LoginAttemptLimiter
+from dashboard.security import LoginAttemptLimiter, SessionTokenRegistry, websocket_origin_matches_host
 
 _DEPS_OK = False
 try:
@@ -461,8 +461,10 @@ class DashboardServer:
         self._ip                          = _local_ip()
         self._tokens: set[str]            = set()
         self._token_keys: dict[str, str]  = {}   # auth_token → session_key
+        self._token_sessions = SessionTokenRegistry(ttl_seconds=8 * 60 * 60)
         self._aes_cache:  dict[str, bytes]= {}   # session_key → AES bytes
         self._clients: set[WebSocket]     = set()
+        self._client_tokens: dict[WebSocket, str] = {}
         self._history: list[dict]         = []
         self._command_queue               = asyncio.Queue()
         self._wake_callback               = None
@@ -507,6 +509,30 @@ class DashboardServer:
             self._aes_cache[session_key] = _derive_key(session_key)
         return self._aes_cache[session_key]
 
+    def _issue_token(self, session_key: str) -> str:
+        """Issue a random bearer token with an eight-hour server-side lifetime."""
+        token = secrets.token_urlsafe(32)
+        self._tokens.add(token)
+        self._token_keys[token] = session_key
+        self._token_sessions.register(token)
+        self._aes_key(session_key)
+        return token
+
+    def _valid_token(self, token: str) -> bool:
+        if not token or token not in self._tokens:
+            return False
+        if self._token_sessions.is_valid(token):
+            return True
+        self._revoke_token(token)
+        return False
+
+    def _revoke_token(self, token: str) -> bool:
+        existed = token in self._tokens
+        self._tokens.discard(token)
+        self._token_keys.pop(token, None)
+        self._token_sessions.revoke(token)
+        return existed
+
     def _decrypt(self, token: str, enc_b64: str) -> str | None:
         sk = self._token_keys.get(token)
         if not sk:
@@ -532,11 +558,20 @@ class DashboardServer:
             self._history = self._history[-300:]
         dead: set[WebSocket] = set()
         for ws in list(self._clients):
+            if not self._valid_token(self._client_tokens.get(ws, "")):
+                try:
+                    await ws.close(code=4001)
+                except Exception:
+                    pass
+                dead.add(ws)
+                continue
             try:
                 await ws.send_json(msg)
             except Exception:
                 dead.add(ws)
         self._clients -= dead
+        for ws in dead:
+            self._client_tokens.pop(ws, None)
 
     # ── FastAPI app ───────────────────────────────────────────────────────
 
@@ -571,7 +606,14 @@ class DashboardServer:
 
         def _auth(req: Request) -> bool:
             tok = req.headers.get("authorization", "").removeprefix("Bearer ").strip()
-            return bool(tok) and tok in self._tokens
+            return self._valid_token(tok)
+
+        def _origin_allowed(websocket: WebSocket) -> bool:
+            # Browser WebSockets carry Origin. Require an exact host match to
+            # prevent a hostile website from reusing a logged-in browser token.
+            return websocket_origin_matches_host(
+                websocket.headers.get("origin", ""), websocket.headers.get("host", "")
+            )
 
         # serve CryptoJS from local cache, fallback to CDN redirect
         @app.get("/static/crypto.js")
@@ -616,10 +658,7 @@ class DashboardServer:
             if entered in self._pending_keys and self._pending_keys[entered] > now:
                 del self._pending_keys[entered]          # one-time use
                 self._login_limiter.record_success(identity)
-                tok = secrets.token_urlsafe(32)
-                self._tokens.add(tok)
-                self._token_keys[tok] = entered
-                self._aes_key(entered)                   # pre-derive & cache
+                tok = self._issue_token(entered)
                 if self._connect_callback:
                     self._connect_callback()
                 asyncio.create_task(self.broadcast(
@@ -656,11 +695,8 @@ class DashboardServer:
 
             self._login_limiter.record_success(identity)
             del self._pending_keys[key]
-            tok     = secrets.token_urlsafe(32)
+            tok = self._issue_token(key)
             dev_tok = secrets.token_urlsafe(32)
-            self._tokens.add(tok)
-            self._token_keys[tok] = key
-            self._aes_key(key)
             self._device_sessions[dev_tok] = {"session_key": key}
 
             if self._connect_callback:
@@ -706,16 +742,21 @@ class DashboardServer:
                 return _login_failure(identity, "Invalid device token")
             self._login_limiter.record_success(identity)
             session_key = self._device_sessions[dev_tok]["session_key"]
-            tok = secrets.token_urlsafe(32)
-            self._tokens.add(tok)
-            self._token_keys[tok] = session_key
-            self._aes_key(session_key)
+            tok = self._issue_token(session_key)
             if self._connect_callback:
                 self._connect_callback()
             asyncio.create_task(self.broadcast(
                 {"type": "sys", "text": "Known device reconnected automatically."}
             ))
             return JSONResponse({"ok": True, "token": tok, "key": session_key})
+
+        @app.post("/api/logout")
+        async def logout(req: Request):
+            token = req.headers.get("authorization", "").removeprefix("Bearer ").strip()
+            if not self._valid_token(token):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            self._revoke_token(token)
+            return JSONResponse({"ok": True})
 
         @app.post("/api/revoke-devices")
         async def revoke_devices(req: Request):
@@ -757,8 +798,11 @@ class DashboardServer:
 
         @app.websocket("/ws/phone-audio")
         async def phone_audio_ws(websocket: WebSocket, token: str = ""):
+            if not _origin_allowed(websocket):
+                await websocket.close(code=4403)
+                return
             tok = token.strip()
-            if not tok or tok not in self._tokens:
+            if not self._valid_token(tok):
                 await websocket.close(code=4001)
                 return
             await websocket.accept()
@@ -767,7 +811,16 @@ class DashboardServer:
             ))
             try:
                 while True:
-                    data = await websocket.receive_bytes()
+                    try:
+                        data = await asyncio.wait_for(websocket.receive_bytes(), timeout=30.0)
+                    except asyncio.TimeoutError:
+                        if not self._valid_token(tok):
+                            await websocket.close(code=4001)
+                            break
+                        continue
+                    if not self._valid_token(tok):
+                        await websocket.close(code=4001)
+                        break
                     try:
                         self._phone_audio_queue.put_nowait(
                             {"data": data, "mime_type": "audio/pcm"}
@@ -861,7 +914,7 @@ class DashboardServer:
         async def download_file(filename: str, token: str = ""):
             # Auth via query param — browser <a download> can't send custom headers
             tok = token.strip()
-            if not tok or tok not in self._tokens:
+            if not self._valid_token(tok):
                 return JSONResponse({"error": "Unauthorized"}, status_code=401)
             safe = re.sub(r'[/\\]', '', filename)
             path = self._uploads_dir / safe
@@ -871,12 +924,16 @@ class DashboardServer:
 
         @app.websocket("/ws")
         async def ws_ep(websocket: WebSocket, token: str = ""):
+            if not _origin_allowed(websocket):
+                await websocket.close(code=4403)
+                return
             tok = token.strip()
-            if not tok or tok not in self._tokens:
+            if not self._valid_token(tok):
                 await websocket.close(code=4001)
                 return
             await websocket.accept()
             self._clients.add(websocket)
+            self._client_tokens[websocket] = tok
             for entry in self._history[-50:]:
                 try:
                     await websocket.send_json(entry)
@@ -884,7 +941,16 @@ class DashboardServer:
                     break
             try:
                 while True:
-                    data = await websocket.receive_json()
+                    try:
+                        data = await asyncio.wait_for(websocket.receive_json(), timeout=30.0)
+                    except asyncio.TimeoutError:
+                        if not self._valid_token(tok):
+                            await websocket.close(code=4001)
+                            break
+                        continue
+                    if not self._valid_token(tok):
+                        await websocket.close(code=4001)
+                        break
                     if data.get("type") == "command":
                         enc = data.get("enc", "")
                         t   = self._decrypt(tok, enc) if enc else (data.get("text") or "").strip()
@@ -896,6 +962,7 @@ class DashboardServer:
                 pass
             finally:
                 self._clients.discard(websocket)
+                self._client_tokens.pop(websocket, None)
 
         return app
 
