@@ -199,9 +199,11 @@ def run_project_command(command: str, project_dir: str | Path, timeout: int | fl
 
 
 def install_dependencies(dependencies: Sequence[str], project_dir: str | Path,
-                         timeout: int | float | None = None) -> str:
-    """Install declared PyPI package names; call only within an approved operation."""
+                         timeout: int | float | None = None,
+                         manager: str = "pip") -> str:
+    """Install declared packages; call only inside an approved operation."""
     import re
+    import shutil as _shutil
 
     cwd = resolve_user_path(project_dir, roots=[Path.home()], must_exist=True)
     if not cwd.is_dir():
@@ -210,16 +212,23 @@ def install_dependencies(dependencies: Sequence[str], project_dir: str | Path,
         return "No external dependencies to install."
     if len(dependencies) > 50:
         raise ExecutionPolicyError("A maximum of 50 dependencies can be installed per request.")
-    package_pattern = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
+    if manager not in {"pip", "npm"}:
+        raise ExecutionPolicyError("Supported package managers are pip and npm.")
+    package_pattern = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@/-]{0,99}$")
     packages = []
     for dependency in dependencies:
-        if not isinstance(dependency, str) or not package_pattern.fullmatch(dependency):
+        if (not isinstance(dependency, str)
+                or not package_pattern.fullmatch(dependency)
+                or dependency.startswith("-")
+                or ".." in dependency
+                or dependency.startswith(("/", "\\\\"))):
             raise ExecutionPolicyError(f"Invalid package name: {dependency!r}")
-        if dependency.startswith("-"):
-            raise ExecutionPolicyError("Package options and flags are not accepted as package names.")
         packages.append(dependency)
-    return _run_process(
-        [sys.executable, "-m", "pip", "install", *packages],
-        cwd,
-        _validate_timeout(timeout or 180),
-    )
+    if manager == "pip":
+        argv = [sys.executable, "-m", "pip", "install", *packages]
+    else:
+        npm = _shutil.which("npm")
+        if not npm:
+            raise ExecutionPolicyError("npm is not installed or is not available on PATH.")
+        argv = [npm, "install", *packages]
+    return _run_process(argv, cwd, _validate_timeout(timeout or 180))
