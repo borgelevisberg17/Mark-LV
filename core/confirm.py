@@ -58,7 +58,7 @@ def request(key: str, title: str, detail: str, run: Callable[[], str],
                     return (f"[OPERATION_STATUS] status=awaiting_confirmation "
                             f"operation_id={_pending.operation_id}. The same operation is already awaiting approval; do not submit it again.")
                 return ("[OPERATION_STATUS] status=awaiting_confirmation. "
-                        "Another operation is awaiting confirmation. Ask the user to resolve that request first.")
+                        "There is already a confirmation waiting on screen. Ask the user to resolve that request first.")
             expired = _pending
             _pending = None
             registry.transition(expired.operation_id, "expired", "Confirmation expired before a decision.")
@@ -72,9 +72,8 @@ def request(key: str, title: str, detail: str, run: Callable[[], str],
         pending = _Pending(operation_id, key, title, detail, run, now)
         _pending = pending
 
-    detail_with_id = f"{detail}\nOperation reference: {operation_id[:12]}"
     try:
-        _show_cb(title, detail_with_id)
+        _show_cb(title, detail)
     except Exception as exc:
         with _lock:
             if _pending and _pending.operation_id == operation_id:
