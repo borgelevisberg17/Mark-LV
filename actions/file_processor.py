@@ -475,6 +475,9 @@ def _process_code(path: Path, action: str, params: dict, speak=None) -> str:
         try:
             return request_execution(
                 key="file-processor-python-run",
+                fingerprint=f"{path.resolve()}:{content}",
+                category="python_file",
+                permissions=("filesystem.read", "process"),
                 title=f"Run Python file: {path.name}",
                 detail=(
                     f"The assistant wants to execute {path} with the current Python interpreter. "

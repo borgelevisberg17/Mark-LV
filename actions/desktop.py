@@ -92,6 +92,9 @@ def _execute_generated_code(code: str, player=None) -> str:
     try:
         return request_execution(
             key="desktop-ai-code",
+            fingerprint=code,
+            category="desktop",
+            permissions=("desktop", "filesystem", "network", "process"),
             title="Run AI-generated desktop task",
             detail=(
                 "The assistant wants to run generated Python code to control the desktop. "

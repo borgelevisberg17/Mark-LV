@@ -543,6 +543,9 @@ def _build_project(
             dependency_summary += f" (+{len(dependencies) - 20} more)"
         return request_execution(
             key=f"dev-agent-{proj_name}",
+            fingerprint=json.dumps({"files": file_codes, "command": run_command, "dependencies": dependencies}, sort_keys=True),
+            category="project",
+            permissions=("filesystem", "process", "network", "package_install"),
             title=f"Install dependencies and run project: {proj_name}",
             detail=(
                 f"Project: {project_dir}\n"

@@ -77,3 +77,14 @@ Network operations need explicit timeouts, response-size limits, URL scheme vali
 6. Add tests for path traversal, destructive-operation confirmation, URL validation, timeout enforcement, and project command behavior on Windows/Linux.
 
 This is a source-level inventory of the listed modules, not a claim that every runtime path has been dynamically exercised.
+
+
+## Operation reliability, recovery, and audit
+
+- Operations have stable IDs and lifecycle states: `awaiting_confirmation`, `running`, `completed`, `failed`, `cancelled`, `expired`, and `unknown_after_restart`.
+- Repeated requests with the same idempotency fingerprint return the recorded state instead of starting the side effect again. Failed or uncertain operations are not automatically replayed; verify the effect before deliberately creating a new request.
+- A compact JSONL audit journal is written to `~/.marklv/operation_audit.jsonl`. It records timestamps, category, status, duration, and declared permission labels; it intentionally omits command output and payload contents. The journal is size-capped/rotated and is best-effort if the filesystem is unavailable.
+- A process restart converts an in-flight operation to `unknown_after_restart`. The app cannot infer whether an external service accepted a request just before a response was lost, so it will not retry that request automatically.
+- Execution timeouts are category-limited (desktop and one-off Python files: 60 seconds; general: 60 seconds; project commands and dependency installation: at most 300 seconds). A timed-out direct child is killed where the OS permits it; this is not a guarantee that descendants have exited.
+- Undo entries are retained when the reverse action fails and can be retried. Undo state and closures are currently session-memory only; an app restart cannot reconstruct arbitrary Python closures, so durable cross-restart undo is not claimed.
+- Plugin code is inspected for a literal `PLUGIN` manifest before import. Untrusted plugins are not imported or executed. Trust and declared capability grants live in `config/plugin_permissions.json`; see `config/plugin_permissions.example.json`. Declared permissions are policy/audit labels, not OS-enforced capabilities. A trusted plugin still runs with the current user's OS permissions. There is no portable OS sandbox for third-party plugins yet; do not trust plugins whose source you have not reviewed.
