@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import time
 from pathlib import Path
 from urllib.parse import quote
@@ -136,7 +137,7 @@ def _load_cache() -> dict:
 def _save_cache(cache: dict) -> None:
     keyring = _keyring()
     serialized = json.dumps(cache, separators=(",", ":"), ensure_ascii=True)
-    generation = hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:16]
+    generation = secrets.token_hex(8)
     chunks = [
         serialized[i:i + _CREDENTIAL_CHUNK_CHARS]
         for i in range(0, len(serialized), _CREDENTIAL_CHUNK_CHARS)
