@@ -51,13 +51,17 @@ class _Entry:
     label:   str                    # human sentence, spoken back to the user
     undo:    Callable[[], str]      # returns a short result string
     at:      float = field(default_factory=time.monotonic)
+    status:  str = "available"
+    error:   str = ""
+    description: str = ""
+    operation_id: str = ""
 
 
 _stack: list[_Entry] = []
 _lock = threading.Lock()
 
 
-def push_undo(label: str, undo_fn: Callable[[], str]) -> None:
+def push_undo(label: str, undo_fn: Callable[[], str], *, description: str = "", operation_id: str = "") -> None:
     """Record that `label` just happened and `undo_fn()` reverses it.
 
     Called from action handlers, which run in executor threads — hence the
@@ -67,7 +71,7 @@ def push_undo(label: str, undo_fn: Callable[[], str]) -> None:
         return
     try:
         with _lock:
-            _stack.append(_Entry(label=str(label)[:120], undo=undo_fn))
+            _stack.append(_Entry(label=str(label)[:120], undo=undo_fn, description=str(description or label)[:500], operation_id=str(operation_id)[:80]))
             # Drop the oldest rather than refusing the newest: the recent past
             # is what people ask to undo.
             while len(_stack) > MAX_DEPTH:
@@ -90,27 +94,42 @@ def peek() -> str:
 def history() -> list[str]:
     """Most recent first — used by the UI panel and the `undo` tool's list mode."""
     with _lock:
-        return [e.label for e in reversed(_stack)]
+        return [f"{e.status.upper()}: {e.label}" if e.status != "available" else e.label for e in reversed(_stack)]
 
 
 def undo_last() -> str:
-    """Reverse the most recent reversible operation.
+    """Undo the newest change; retain a failed entry so the user can retry it.
 
-    The entry is popped *before* running so a failing undo cannot be retried
-    forever against a world that has already moved on (the file the user is
-    trying to restore may have been deleted by something else since)."""
+    The entry is reserved under the lock, but the reverse action runs outside the
+    lock. Concurrent undo calls cannot execute the same reverse action twice.
+    """
     with _lock:
-        entry = _stack.pop() if _stack else None
+        entry = _stack[-1] if _stack else None
+        if entry is None:
+            return ("There is nothing to undo. I only track changes registered by "
+                    "this session, such as files moved or written and settings adjusted.")
+        if entry.status == "undoing":
+            return f"Undo is already running for '{entry.label}'."
+        entry.status = "undoing"
+        entry.error = ""
 
-    if entry is None:
-        return ("There is nothing to undo. I only track things I changed myself — "
-                "files I moved or wrote, and settings I adjusted.")
-
+    started = time.monotonic()
     try:
         detail = entry.undo() or ""
-    except Exception as e:
-        return f"Could not undo '{entry.label}': {e}"
-
+    except Exception as exc:
+        with _lock:
+            entry.status = "failed"
+            entry.error = str(exc)[:500]
+        elapsed = time.monotonic() - started
+        print(f"[Undo] FAILED after {elapsed:.2f}s: {entry.label}: {exc}")
+        return (f"Undo failed for '{entry.label}' after {elapsed:.1f}s: {exc}. "
+                "The undo record was retained; you can inspect the state and retry.")
+    with _lock:
+        if entry in _stack:
+            _stack.remove(entry)
+        entry.status = "completed"
+    elapsed = time.monotonic() - started
+    print(f"[Undo] COMPLETED after {elapsed:.2f}s: {entry.label}")
     return f"Undone: {entry.label}." + (f" {detail}" if detail else "")
 
 
