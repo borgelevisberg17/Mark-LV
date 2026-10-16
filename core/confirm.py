@@ -1,38 +1,4 @@
-"""
-core/confirm.py — a confirmation the model cannot forge.
-
-THE PROBLEM WITH THE OLD GATE
-    computer_settings guarded shutdown and restart like this:
-
-        confirmed = str(params.get("confirmed", "")).lower()
-        if confirmed not in ("yes", "true", "1", "confirm"):
-            return "Please confirm by calling again with confirmed=yes."
-
-    `confirmed` is a tool parameter, which means the *model* writes it. Nothing
-    stops it from sending confirmed=yes on the first call, and nothing checks
-    that a human was ever involved. It is a convention, not a gate — and its
-    coverage was two actions, so deleting files and switching off the WiFi the
-    assistant is talking over went through with no gate at all.
-
-THE DESIGN HERE
-    The confirmation token is issued by the *interface*, never by the model:
-
-      1. An action calls `request(...)` with a callable that does the real work.
-      2. This module hands the UI a banner with CONFIRM / CANCEL and returns
-         IMMEDIATELY with a sentence for the model to say out loud.
-      3. If — and only if — the user presses CONFIRM, the UI calls `resolve()`,
-         which runs the stored callable off the Qt thread.
-
-    Nothing blocks. The model keeps talking while the banner is up, so this
-    costs no latency at all; in fact it is cheaper than the old gate, which
-    burned two tool round trips (reject, then re-call) on every shutdown.
-
-WHAT BELONGS HERE AND WHAT DOES NOT
-    Only genuinely irreversible things. Anything that can be reversed should be
-    done at once and pushed onto core/undo.py instead — undo is faster than a
-    question, and an assistant that asks before every action is one nobody uses.
-"""
-
+"""Human-in-the-loop confirmation with idempotent operation tracking."""
 from __future__ import annotations
 
 import threading
@@ -40,95 +6,94 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-# A pending confirmation is abandoned after this long. Chosen to outlast a
-# normal "hang on, let me look at the screen" pause without leaving a live
-# shutdown button sitting on the HUD for the rest of the day.
+from core.operation_registry import registry
+
 TIMEOUT_SECONDS = 90.0
 
 
 @dataclass
 class _Pending:
-    key:     str
-    title:   str
-    detail:  str
-    run:     Callable[[], str]
-    at:      float
+    operation_id: str
+    key: str
+    title: str
+    detail: str
+    run: Callable[[], str]
+    at: float
 
 
 _pending: Optional[_Pending] = None
-_lock = threading.Lock()
-
-# Set once at startup by main.py. Signature: (title, detail) -> None for show,
-# and () -> None for hide. Both are marshalled onto the Qt thread by the UI.
+_lock = threading.RLock()
 _show_cb: Optional[Callable[[str, str], None]] = None
 _hide_cb: Optional[Callable[[], None]] = None
-_log_cb:  Optional[Callable[[str], None]] = None
+_log_cb: Optional[Callable[[str], None]] = None
 
 
 def bind(show, hide, log=None) -> None:
-    """Wire this module to the HUD. Called once from main.py at startup."""
+    """Wire confirmation controls and audit logging to the desktop UI."""
     global _show_cb, _hide_cb, _log_cb
     _show_cb, _hide_cb, _log_cb = show, hide, log
 
 
-def _log(msg: str) -> None:
+def _log(message: str) -> None:
     if _log_cb:
         try:
-            _log_cb(msg)
+            _log_cb(message)
         except Exception:
             pass
 
 
-def request(key: str, title: str, detail: str, run: Callable[[], str]) -> str:
-    """Park an irreversible action behind the on-screen gate.
-
-    Returns the sentence the tool should hand back to the model — phrased as an
-    instruction so the assistant asks the user out loud in their own language,
-    rather than reading an English string verbatim."""
+def request(key: str, title: str, detail: str, run: Callable[[], str],
+            category: str = "general", permissions: tuple[str, ...] | list[str] = ()) -> str:
+    """Queue a human confirmation. The interface, not the model, approves it."""
     global _pending
-
     if _show_cb is None:
-        # No interface bound (headless, or a very early call). Refuse rather
-        # than silently performing something irreversible.
-        return (f"I cannot confirm '{title}' right now because the interface is "
-                f"not available, so I have not done it.")
+        return f"I cannot confirm '{title}' because the interface is not available; nothing was done."
 
     now = time.monotonic()
     with _lock:
-        # The gate is shared by every action. Reject concurrent requests here,
-        # not only in individual callers, so a second request cannot silently
-        # replace the action the user is currently being asked to approve.
-        if _pending is not None and now - _pending.at <= TIMEOUT_SECONDS:
-            return ("There is already a confirmation waiting on screen. "
-                    "Ask the user to answer that one first. Nothing new was done.")
-        _pending = _Pending(key=key, title=title, detail=detail,
-                            run=run, at=now)
+        if _pending is not None:
+            if now - _pending.at <= TIMEOUT_SECONDS:
+                if _pending.key == key:
+                    rec = registry.get(_pending.operation_id) or {}
+                    return (f"[OPERATION_STATUS] status=awaiting_confirmation "
+                            f"operation_id={_pending.operation_id}. The same operation is already awaiting approval; do not submit it again.")
+                return ("[OPERATION_STATUS] status=awaiting_confirmation. "
+                        "There is already a confirmation waiting on screen. Ask the user to resolve that request first.")
+            expired = _pending
+            _pending = None
+            registry.transition(expired.operation_id, "expired", "Confirmation expired before a decision.")
+        record, created = registry.create(key, title, category, permissions)
+        if not created:
+            status = record.get("status", "unknown_after_restart")
+            message = record.get("result") or "This operation has already been submitted."
+            return (f"[OPERATION_STATUS] status={status} operation_id={record['operation_id']}. "
+                    f"{message} Do not repeat it automatically; verify its effects or use a new explicit operation.")
+        operation_id = record["operation_id"]
+        pending = _Pending(operation_id, key, title, detail, run, now)
+        _pending = pending
 
     try:
         _show_cb(title, detail)
-    except Exception as e:
+    except Exception as exc:
         with _lock:
-            _pending = None
-        return f"Could not ask for confirmation: {e}. Nothing was done."
+            if _pending and _pending.operation_id == operation_id:
+                _pending = None
+        registry.transition(operation_id, "failed", f"Could not display confirmation: {exc}")
+        return f"Could not ask for confirmation: {exc}. Nothing was executed."
 
-    _log(f"SYS: Awaiting confirmation — {title}")
-    return (
-        f"[CONFIRMATION_PENDING] I have put a confirmation on screen for: {title}. "
-        f"Say ONE short sentence in the user's own language telling them you need "
-        f"them to confirm it on the HUD before you do it. Do not claim it is done."
-    )
+    _log(f"SYS: awaiting_confirmation id={operation_id} title={title}")
+    return (f"[CONFIRMATION_PENDING] [OPERATION_STATUS] status=awaiting_confirmation operation_id={operation_id}. "
+            f"Confirmation is visible on screen for '{title}'. Ask the user to approve it there; do not claim completion.")
 
 
 def resolve(accepted: bool) -> None:
-    """Called by the UI when the user presses CONFIRM or CANCEL.
-
-    Runs the stored callable on a worker thread — this is invoked from the Qt
-    thread, and shutting the machine down from inside a button handler would
-    freeze the interface on its way out."""
+    """Resolve the visible request once; execute accepted work off the UI thread."""
     global _pending
-
     with _lock:
-        p, _pending = _pending, None
+        pending = _pending
+        if pending is None:
+            return
+        _pending = None
 
     if _hide_cb:
         try:
@@ -136,33 +101,55 @@ def resolve(accepted: bool) -> None:
         except Exception:
             pass
 
-    if p is None:
+    if time.monotonic() - pending.at > TIMEOUT_SECONDS:
+        registry.transition(pending.operation_id, "expired", "Confirmation expired before approval.")
+        _log(f"SYS: expired id={pending.operation_id} title={pending.title}")
         return
-
-    if time.monotonic() - p.at > TIMEOUT_SECONDS:
-        _log(f"SYS: Confirmation expired — {p.title}")
-        return
-
     if not accepted:
-        _log(f"SYS: Cancelled — {p.title}")
+        registry.transition(pending.operation_id, "cancelled", "User cancelled before execution.")
+        _log(f"SYS: cancelled id={pending.operation_id} title={pending.title}")
         return
 
-    def _worker():
-        try:
-            result = p.run() or "Done."
-            _log(f"SYS: Confirmed — {p.title}. {result}")
-        except Exception as e:
-            _log(f"ERR: {p.title} failed — {e}")
+    current = registry.get(pending.operation_id)
+    if not current or current.get("status") != "awaiting_confirmation":
+        _log(f"SYS: duplicate confirmation ignored id={pending.operation_id}")
+        return
+    registry.transition(pending.operation_id, "running", "Execution started after explicit approval.")
 
-    threading.Thread(target=_worker, daemon=True,
-                     name=f"confirm-{p.key}").start()
+    def worker() -> None:
+        started = time.monotonic()
+        try:
+            value = pending.run()
+            result = str(value or "Operation completed.")
+            record = registry.transition(pending.operation_id, "completed", result)
+            duration = (record or {}).get("duration_ms")
+            _log(f"SYS: completed id={pending.operation_id} duration_ms={duration} title={pending.title}: {result[:500]}")
+        except Exception as exc:
+            # Failure does not imply no side effect; idempotency prevents automatic replay.
+            registry.transition(pending.operation_id, "failed", f"{type(exc).__name__}: {exc}")
+            _log(f"ERR: failed id={pending.operation_id} duration_ms={round((time.monotonic()-started)*1000)} title={pending.title}: {exc}")
+
+    threading.Thread(target=worker, daemon=True, name=f"confirm-{pending.operation_id[:12]}").start()
 
 
 def pending_title() -> str:
-    """'' when nothing is waiting. Lets an action avoid stacking two banners."""
+    """Return the visible pending confirmation title, or an empty string."""
     with _lock:
         if _pending is None:
             return ""
         if time.monotonic() - _pending.at > TIMEOUT_SECONDS:
             return ""
         return _pending.title
+
+
+def pending_operation_id() -> str:
+    with _lock:
+        return _pending.operation_id if _pending else ""
+
+
+def operation_status(operation_id: str) -> dict | None:
+    return registry.get(operation_id)
+
+
+def recent_operations(limit: int = 20) -> list[dict]:
+    return registry.list_recent(limit)

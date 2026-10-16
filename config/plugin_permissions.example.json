@@ -1,0 +1,8 @@
+{
+  "plugins": {
+    "example_plugin": {
+      "trusted": false,
+      "permissions": []
+    }
+  }
+}

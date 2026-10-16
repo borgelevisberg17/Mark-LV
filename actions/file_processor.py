@@ -21,12 +21,16 @@ import re
 import json
 import shutil
 import subprocess
+import stat
+import zipfile
+import tarfile
 import tempfile
 from pathlib import Path
 from datetime import datetime
 
 # Model choice, timeout and fallback ladder all live in core/gemini.py.
 from core import gemini
+from core.path_policy import PathPolicyError, resolve_child_path, resolve_user_path, user_accessible_roots
 
 def _get_api_key() -> str:
     config_path = Path(__file__).resolve().parent.parent / "config" / "api_keys.json"
@@ -81,9 +85,10 @@ def _file_size_str(path: Path) -> str:
     return f"{size/1024**3:.1f} GB"
 
 def _output_path(src: Path, suffix: str, new_ext: str = None) -> Path:
-    ext  = new_ext or src.suffix
+    """Create a sibling output path without allowing suffix-based traversal."""
+    ext = new_ext or src.suffix
     name = f"{src.stem}_{suffix}{ext}"
-    return src.parent / name
+    return resolve_child_path(src.parent, name, roots=user_accessible_roots())
 
 def _process_image(path: Path, action: str, params: dict, speak=None) -> str:
     try:
@@ -463,14 +468,28 @@ def _process_code(path: Path, action: str, params: dict, speak=None) -> str:
     ext     = path.suffix.lstrip(".")
 
     if action == "run":
-        # A timeout is not a sandbox: arbitrary Python can still access the
-        # user's files, credentials, network and operating-system APIs.
-        return (
-            "Direct code execution is disabled for safety. "
-            "The file can be reviewed or explained, but execution requires "
-            "a dedicated isolated runner with restricted filesystem/network "
-            "access and resource limits."
-        )
+        if path.suffix.lower() != ".py":
+            return "The run action currently supports Python (.py) files only."
+        from core.execution import ExecutionPolicyError, request_execution, run_python_file
+
+        try:
+            return request_execution(
+                key="file-processor-python-run",
+                fingerprint=f"{path.resolve()}:{content}",
+                category="python_file",
+                permissions=("filesystem.read", "process"),
+                title=f"Run Python file: {path.name}",
+                detail=(
+                    f"The assistant wants to execute {path} with the current Python interpreter. "
+                    "The script will run with your current user's permissions and may access "
+                    "files, applications, and network resources available to your account. "
+                    "Execution is limited to 60 seconds."
+                ),
+                operation=lambda: run_python_file(path, timeout=60),
+                player=params.get("_player"),
+            )
+        except (ExecutionPolicyError, OSError, ValueError) as exc:
+            return f"Could not prepare Python execution: {exc}"
 
     if action == "info":
         lines = content.count("\n")
@@ -710,33 +729,128 @@ def _process_video(path: Path, action: str, params: dict, speak=None) -> str:
 
     return f"Unknown video action: '{action}'. Try: info, trim, extract_audio, extract_frame, compress, transcribe, convert"
 
+def _safe_archive_target(destination: Path, member_name: str) -> Path:
+    raw = member_name.replace(chr(92), "/")
+    while raw.startswith("./"):
+        raw = raw[2:]
+    raw = raw.rstrip("/")
+    if not raw or raw == ".":
+        return destination
+    return resolve_child_path(destination, raw, roots=user_accessible_roots())
+
+
+def _safe_extract_archive(path: Path, destination: Path) -> int:
+    """Extract ZIP/TAR regular files only; reject traversal, links and special files."""
+    max_members = 10000
+    max_total_bytes = 2 * 1024 * 1024 * 1024
+    extracted = 0
+
+    if path.suffix.lower() == ".zip":
+        with zipfile.ZipFile(path) as archive:
+            infos = archive.infolist()
+            if len(infos) > max_members:
+                raise PathPolicyError("Archive has too many entries.")
+            planned = []
+            total_size = 0
+            for info in infos:
+                mode = (info.external_attr >> 16) & 0xFFFF
+                if stat.S_ISLNK(mode):
+                    raise PathPolicyError("Archive contains a symbolic link; extraction refused.")
+                target = _safe_archive_target(destination, info.filename)
+                is_dir = info.is_dir()
+                if not is_dir:
+                    total_size += info.file_size
+                if total_size > max_total_bytes:
+                    raise PathPolicyError("Archive exceeds the 2 GiB extraction limit.")
+                planned.append((info, target, is_dir))
+            for info, target, is_dir in planned:
+                if target == destination or is_dir:
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target = _safe_archive_target(destination, info.filename)
+                with archive.open(info, "r") as source, target.open("xb") as output:
+                    shutil.copyfileobj(source, output)
+                extracted += 1
+        return extracted
+
+    if path.suffix.lower() in (".tar", ".gz", ".bz2", ".xz", ".tgz", ".tbz2", ".txz"):
+        with tarfile.open(path, "r:*") as archive:
+            members = archive.getmembers()
+            if len(members) > max_members:
+                raise PathPolicyError("Archive has too many entries.")
+            planned = []
+            total_size = 0
+            for member in members:
+                if not (member.isdir() or member.isfile()):
+                    raise PathPolicyError("Archive contains links or special files; extraction refused.")
+                target = _safe_archive_target(destination, member.name)
+                if member.isfile():
+                    total_size += member.size
+                if total_size > max_total_bytes:
+                    raise PathPolicyError("Archive exceeds the 2 GiB extraction limit.")
+                planned.append((member, target))
+            for member, target in planned:
+                if target == destination or member.isdir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target = _safe_archive_target(destination, member.name)
+                source = archive.extractfile(member)
+                if source is None:
+                    raise PathPolicyError(f"Could not read archive entry: {member.name}")
+                with source, target.open("xb") as output:
+                    shutil.copyfileobj(source, output)
+                extracted += 1
+        return extracted
+
+    raise PathPolicyError(f"Unsupported safe extraction format: {path.suffix.lower()}")
+
+
 def _process_archive(path: Path, action: str, params: dict, speak=None) -> str:
     action = action or "list"
 
     if action == "list":
         try:
-            import zipfile, tarfile
             ext = path.suffix.lower()
             if ext == ".zip":
                 with zipfile.ZipFile(path) as z:
                     names = z.namelist()
-            elif ext in (".tar", ".gz", ".bz2", ".xz"):
-                with tarfile.open(path) as t:
+            elif ext in (".tar", ".gz", ".bz2", ".xz", ".tgz", ".tbz2", ".txz"):
+                with tarfile.open(path, "r:*") as t:
                     names = t.getnames()
             else:
                 return f"Unsupported archive format: {ext}"
             preview = "\n".join(names[:30])
-            suffix  = f"\n... and {len(names)-30} more" if len(names) > 30 else ""
+            suffix = f"\n... and {len(names)-30} more" if len(names) > 30 else ""
             return f"Archive contains {len(names)} files:\n{preview}{suffix}"
         except Exception as e:
             return f"List failed: {e}"
 
     if action == "extract":
-        dest = Path(params.get("destination", str(path.parent / path.stem)))
-        dest.mkdir(parents=True, exist_ok=True)
+        raw_destination = params.get("destination") or str(path.parent / path.stem)
         try:
-            shutil.unpack_archive(path, dest)
-            return f"Extracted to: {dest}"
+            raw_destination_text = str(raw_destination)
+            destination_path = Path(raw_destination_text).expanduser()
+            if destination_path.is_absolute():
+                dest = resolve_user_path(
+                    destination_path,
+                    roots=user_accessible_roots(),
+                )
+            else:
+                dest = resolve_child_path(
+                    path.parent,
+                    raw_destination_text,
+                    roots=user_accessible_roots(),
+                )
+            if dest == path or (dest.exists() and dest.is_file()):
+                return "Extraction destination must be a directory, not a file."
+            dest.mkdir(parents=True, exist_ok=True)
+            dest = resolve_user_path(dest, roots=user_accessible_roots())
+            count = _safe_extract_archive(path, dest)
+            return f"Extracted {count} file(s) to: {dest}"
+        except (OSError, PathPolicyError) as e:
+            return f"Extract refused or failed: {e}"
         except Exception as e:
             return f"Extract failed: {e}"
 
@@ -777,20 +891,26 @@ def _process_pptx(path: Path, action: str, params: dict, speak=None) -> str:
     return f"Unknown PPTX action: '{action}'. Try: summarize, extract_text, analyze"
 
 def file_processor(parameters: dict, player=None, speak=None) -> str:
-    file_path_str = parameters.get("file_path", "").strip()
-    if not file_path_str:
+    raw_file_path = (parameters or {}).get("file_path", "")
+    if not isinstance(raw_file_path, str) or not raw_file_path.strip():
         return "No file path provided."
 
-    path = Path(file_path_str)
-    if not path.exists():
-        return f"File not found: {file_path_str}"
+    file_path_str = raw_file_path.strip()
+    try:
+        path = resolve_user_path(
+            file_path_str,
+            roots=user_accessible_roots(),
+            must_exist=True,
+        )
+    except PathPolicyError as e:
+        return f"Access denied by file path policy: {e}"
     if not path.is_file():
         return f"Path is not a file: {file_path_str}"
 
     file_type   = _detect_type(path)
     action      = (parameters.get("action") or "").lower().strip()
     instruction = parameters.get("instruction", "")
-    params      = {**parameters, "instruction": instruction}
+    params      = {**parameters, "instruction": instruction, "_player": player}
 
     log_msg = f"[FileProcessor] {file_type.upper()} | {path.name} | action={action or 'auto'}"
     print(log_msg)

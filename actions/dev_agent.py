@@ -5,6 +5,7 @@ import json
 import re
 import time
 from pathlib import Path
+from core.path_policy import PathPolicyError, resolve_child_path, resolve_user_path
 
 
 def get_base_dir():
@@ -71,7 +72,10 @@ def _classify_error(output: str) -> str:
 
     low = output.lower()
 
-    if any(x in low for x in ("no module named", "modulenotfounderror", "importerror")):
+    if any(x in low for x in (
+        "no module named", "modulenotfounderror", "importerror",
+        "cannot find module", "cannot find package", "err_module_not_found",
+    )):
         return "dependency_error"
 
     if "syntaxerror" in low or "invalid syntax" in low:
@@ -166,7 +170,9 @@ def _write_file(
 ) -> str:
     model = _get_model(MODEL_WRITER)
 
-    file_path = file_info["path"]
+    file_path = file_info.get("path", "")
+    if not isinstance(file_path, str) or not file_path.strip():
+        raise PathPolicyError("Generated project file path must be a non-empty relative path.")
     file_desc = file_info.get("description", "")
     file_imports = file_info.get("imports", [])
 
@@ -228,7 +234,7 @@ Code for {file_path}:"""
         response = model.generate_content(prompt)
         code = _strip_fences(response.text)
 
-        full_path = project_dir / file_path
+        full_path = resolve_child_path(project_dir, file_path, roots=[Path.home()])
         full_path.parent.mkdir(parents=True, exist_ok=True)
         full_path.write_text(code, encoding="utf-8")
 
@@ -240,40 +246,17 @@ Code for {file_path}:"""
             raise RateLimitError(str(e))
         raise
 
-def _install_dependencies(dependencies: list[str], project_dir: Path) -> str:
-    if not dependencies:
-        return "No external dependencies."
+def _install_dependencies(
+    dependencies: list[str],
+    project_dir: Path,
+    manager: str = "pip",
+) -> str:
+    """Install declared packages from an already approved execution workflow."""
+    from core.execution import install_dependencies
 
-    to_install = []
-    for dep in dependencies:
-        pkg_name = re.split(r"[>=<!]", dep)[0].strip()
-        result = subprocess.run(
-            [sys.executable, "-m", "pip", "show", pkg_name],
-            capture_output=True, text=True
-        )
-        if result.returncode != 0:
-            to_install.append(dep)
-        else:
-            print(f"[DevAgent] ✓ Already installed: {pkg_name}")
+    return install_dependencies(dependencies, project_dir, timeout=180, manager=manager)
 
-    if not to_install:
-        return f"All dependencies already installed: {', '.join(dependencies)}"
 
-    print(f"[DevAgent] 📦 Installing: {to_install}")
-    try:
-        result = subprocess.run(
-            [sys.executable, "-m", "pip", "install"] + to_install,
-            capture_output=True, text=True,
-            encoding="utf-8", errors="replace",
-            timeout=120, cwd=str(project_dir)
-        )
-        if result.returncode == 0:
-            return f"Installed: {', '.join(to_install)}"
-        return f"Install warning (non-fatal): {result.stderr[:200]}"
-    except subprocess.TimeoutExpired:
-        return "Dependency install timed out (non-fatal)."
-    except Exception as e:
-        return f"Install error (non-fatal): {e}"
 
 def _open_vscode(project_dir: Path) -> bool:
     # Launch only a concrete executable; never pass a dynamic path through cmd.exe.
@@ -301,59 +284,66 @@ def _open_vscode(project_dir: Path) -> bool:
     return False
 
 def _run_project(run_command: str, project_dir: Path, timeout: int = 30) -> str:
-    print(f"[DevAgent] 🚀 Running: {run_command}")
-    try:
-        parts = run_command.split()
-        if parts[0].lower() == "python":
-            parts[0] = sys.executable
+    """Run a project command without shell interpretation."""
+    from core.execution import run_project_command
 
-        result = subprocess.run(
-            parts,
-            capture_output=True, text=True,
-            encoding="utf-8", errors="replace",
-            timeout=timeout,
-            cwd=str(project_dir)
-        )
+    return run_project_command(run_command, project_dir, timeout=timeout)
 
-        stdout = result.stdout.strip()
-        stderr = result.stderr.strip()
-
-        combined_parts = []
-        if stdout:
-            combined_parts.append(f"STDOUT:\n{stdout}")
-        if stderr:
-            combined_parts.append(f"STDERR:\n{stderr}")
-
-        return "\n\n".join(combined_parts) if combined_parts else "Ran with no output."
-
-    except subprocess.TimeoutExpired:
-        return f"Timed out after {timeout}s — long-running app (server/GUI) is likely working."
-    except FileNotFoundError as e:
-        return f"Command not found: {e}"
-    except Exception as e:
-        return f"Run error: {e}"
 
 def _try_auto_install(error_output: str, project_dir: Path) -> bool:
-    """If there is a ModuleNotFoundError, tries to auto-install the missing package."""
-    pattern = re.compile(
-        r"No module named ['\"]([a-zA-Z0-9_\-\.]+)['\"]", re.IGNORECASE
-    )
-    match = pattern.search(error_output)
-    if not match:
+    """Best-effort missing-package recovery, only inside the approved workflow."""
+    from core.execution import install_dependencies
+
+    python_match = re.search(r"No module named ['\"]([A-Za-z0-9_.-]+)['\"]", error_output, re.IGNORECASE)
+    node_match = re.search(r"(?:Cannot find module|Cannot find package) ['\"]([^'\"]+)['\"]", error_output, re.IGNORECASE)
+    manager = "pip"
+    package = None
+    if node_match:
+        package = node_match.group(1).strip()
+        manager = "npm"
+        if package.startswith((".", "/", "\\\\")):
+            return False
+    elif python_match:
+        package = python_match.group(1).split(".")[0]
+    if not package or package.startswith("-") or len(package) > 100:
+        return False
+    try:
+        result = install_dependencies([package], project_dir, timeout=180, manager=manager)
+        return not result.startswith("Process exited with code ")
+    except Exception as exc:
+        print(f"[DevAgent] Automatic dependency recovery failed: {exc}")
         return False
 
-    pkg = match.group(1).replace("_", "-").split(".")[0]
-    print(f"[DevAgent] 🔧 Auto-installing missing package: {pkg}")
-    try:
-        result = subprocess.run(
-            [sys.executable, "-m", "pip", "install", pkg],
-            capture_output=True, text=True,
-            encoding="utf-8", errors="replace",
-            timeout=60, cwd=str(project_dir)
-        )
-        return result.returncode == 0
-    except Exception:
-        return False
+
+def _execute_project_workflow(
+    dependencies: list[str],
+    run_command: str,
+    project_dir: Path,
+    timeout: int,
+    language: str,
+    player=None,
+) -> str:
+    """Install declared dependencies, run the project and recover missing packages."""
+    manager = "npm" if language.lower() in {"javascript", "typescript", "js", "ts", "node"} else "pip"
+    if dependencies:
+        install_result = _install_dependencies(dependencies, project_dir, manager=manager)
+        if install_result.startswith("Process exited with code "):
+            return f"Dependency installation failed.\n{install_result}"
+    result = _run_project(run_command, project_dir, timeout=timeout)
+    for _ in range(2):
+        if _classify_error(result) != "dependency_error":
+            break
+        if not _try_auto_install(result, project_dir):
+            break
+        result = _run_project(run_command, project_dir, timeout=timeout)
+    if player:
+        try:
+            player.write_log(f"[DevAgent] Project execution result: {result[:12000]}")
+        except Exception:
+            pass
+    return result
+
+
 
 def _fix_files(
     error_output: str,
@@ -430,7 +420,7 @@ Fixed code for {fix_path}:"""
             response = model.generate_content(prompt)
             fixed = _strip_fences(response.text)
 
-            full_path = project_dir / fix_path
+            full_path = resolve_child_path(project_dir, fix_path, roots=[Path.home()])
             full_path.parent.mkdir(parents=True, exist_ok=True)
             full_path.write_text(fixed, encoding="utf-8")
 
@@ -470,15 +460,33 @@ def _build_project(
         if speak: speak(msg)
         return msg
 
-    proj_name    = project_name or plan.get("project_name", "jarvis_project")
-    proj_name    = re.sub(r"[^\w\-]", "_", proj_name)
-    project_dir  = PROJECTS_DIR / proj_name
-    project_dir.mkdir(parents=True, exist_ok=True)
+    requested_name = project_name or plan.get("project_name", "jarvis_project")
+    if not isinstance(requested_name, str):
+        requested_name = "jarvis_project"
+    proj_name = re.sub(r"[^\w\-]", "_", requested_name).strip("._-") or "jarvis_project"
+    try:
+        projects_root = resolve_user_path(PROJECTS_DIR, roots=[Path.home()])
+        projects_root.mkdir(parents=True, exist_ok=True)
+        projects_root = resolve_user_path(projects_root, roots=[Path.home()])
+        project_dir = resolve_child_path(projects_root, proj_name, roots=[Path.home()])
+        project_dir.mkdir(parents=True, exist_ok=True)
+        project_dir = resolve_user_path(project_dir, roots=[Path.home()])
+    except (OSError, PathPolicyError) as e:
+        return f"Project directory rejected by path policy: {e}"
 
     files        = plan.get("files", [])
     entry_point  = plan.get("entry_point", "main.py")
     run_command  = plan.get("run_command", f"python {entry_point}")
     dependencies = plan.get("dependencies", [])
+
+    if not isinstance(files, list) or not files:
+        return "The project planner returned an invalid or empty file list."
+    if not isinstance(run_command, str) or not run_command.strip():
+        return "The project planner returned an invalid run command."
+    if not isinstance(dependencies, list) or any(
+        not isinstance(item, str) or not item.strip() for item in dependencies
+    ):
+        return "The project planner returned an invalid dependency list."
 
     log(f"Project: {proj_name} | Files: {len(files)} | Entry: {entry_point}")
 
@@ -523,67 +531,39 @@ def _build_project(
         if speak: speak(msg)
         return msg
 
-    if dependencies:
-        install_result = _install_dependencies(dependencies, project_dir)
-        log(install_result)
-
     _open_vscode(project_dir)
 
-    last_output   = ""
-    auto_installs = 0  
-
-    for attempt in range(1, MAX_FIX_ATTEMPTS + 1):
-        log(f"Running project (attempt {attempt}/{MAX_FIX_ATTEMPTS})...")
-        last_output = _run_project(run_command, project_dir, timeout)
-        log(f"Output preview: {last_output[:150]}")
-
-        if not _has_error(last_output, run_command):
-            msg = (
-                f"Project '{proj_name}' is working, sir. "
-                f"Built in {attempt} attempt{'s' if attempt > 1 else ''}. "
-                f"Saved to: {project_dir}"
-            )
-            if speak: speak(msg)
-            return f"{msg}\n\nOutput:\n{last_output}"
-
-        if attempt == MAX_FIX_ATTEMPTS:
-            break
-
-        error_type = _classify_error(last_output)
-        if error_type == "dependency_error" and auto_installs < 3:
-            installed = _try_auto_install(last_output, project_dir)
-            if installed:
-                auto_installs += 1
-                log("Missing dependency installed, retrying...")
-                time.sleep(1)
-                continue
-
-        log(f"Fixing errors (type: {error_type})...")
-        try:
-            updated = _fix_files(
-                error_output=last_output,
-                project_description=description,
-                all_files=files,
-                file_codes=file_codes,
-                language=language,
-                project_dir=project_dir,
-                entry_point=entry_point,
-            )
-            file_codes.update(updated)
-            time.sleep(1)
-        except RateLimitError:
-            msg = "Rate limit reached during fix. Project saved, check it manually in VSCode."
-            if speak: speak(msg)
-            return msg
-        except Exception as e:
-            log(f"Fix step failed: {e}")
-
-    msg = (
-        f"I couldn't fully fix '{proj_name}' after {MAX_FIX_ATTEMPTS} attempts, sir. "
-        f"Project is saved at {project_dir} — open it in VSCode and check manually."
-    )
-    if speak: speak(msg)
-    return f"{msg}\n\nLast error:\n{last_output[:600]}"
+    from core.execution import ExecutionPolicyError, parse_command, request_execution
+    try:
+        parse_command(run_command)
+        bounded_timeout = max(1, min(300, int(timeout or 30)))
+        manager = "npm" if language.lower() in {"javascript", "typescript", "js", "ts", "node"} else "pip"
+        dependency_summary = ", ".join(dependencies[:20]) if dependencies else "none declared"
+        if len(dependencies) > 20:
+            dependency_summary += f" (+{len(dependencies) - 20} more)"
+        return request_execution(
+            key=f"dev-agent-{proj_name}",
+            fingerprint=json.dumps({"files": file_codes, "command": run_command, "dependencies": dependencies}, sort_keys=True),
+            category="project",
+            permissions=("filesystem", "process", "network", "package_install"),
+            title=f"Install dependencies and run project: {proj_name}",
+            detail=(
+                f"Project: {project_dir}\n"
+                f"Command: {run_command}\n"
+                f"Package manager: {manager}\n"
+                f"Declared dependencies: {dependency_summary}\n"
+                f"Timeout per command: {bounded_timeout}s. If execution reports a missing "
+                "package, the assistant may try up to two automatic dependency-recovery "
+                "attempts. Commands run with your current user's permissions; this is not "
+                "an OS sandbox. Approve only if you trust the generated project."
+            ),
+            operation=lambda: _execute_project_workflow(
+                dependencies, run_command, project_dir, bounded_timeout, language, player
+            ),
+            player=player,
+        )
+    except (ExecutionPolicyError, OSError, ValueError) as exc:
+        return f"Project generated at {project_dir}, but execution could not be prepared: {exc}"
 
 
 def dev_agent(
@@ -597,7 +577,10 @@ def dev_agent(
     description  = p.get("description", "").strip()
     language     = p.get("language", "python").strip()
     project_name = p.get("project_name", "").strip()
-    timeout      = int(p.get("timeout", 30))
+    try:
+        timeout = max(1, min(300, int(p.get("timeout", 30))))
+    except (TypeError, ValueError):
+        return "Timeout must be an integer between 1 and 300 seconds."
 
     if not description:
         return "Please describe the project you want me to build, sir."

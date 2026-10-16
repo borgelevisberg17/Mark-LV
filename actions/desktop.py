@@ -81,16 +81,34 @@ def _build_sandbox() -> dict:
 
 
 def _execute_generated_code(code: str, player=None) -> str:
-    """Fail closed: generated Python is not a security sandbox.
+    """Queue generated desktop Python for explicit human approval."""
+    if not isinstance(code, str) or not code.strip():
+        return "No executable Python was generated."
+    if code.strip() == "UNSAFE":
+        return "The requested desktop task was rejected by the safety rules."
 
-    The former restricted globals still exposed powerful Python objects and ran
-    code with the application's user permissions. Do not execute model output
-    until a separately isolated worker with OS-enforced limits is implemented.
-    """
-    return (
-        "AI-generated desktop code is disabled for safety. "
-        "Use one of the supported explicit desktop actions instead."
-    )
+    from core.execution import ExecutionPolicyError, request_execution, run_python_code
+
+    try:
+        return request_execution(
+            key="desktop-ai-code",
+            fingerprint=code,
+            category="desktop",
+            permissions=("desktop", "filesystem", "network", "process"),
+            title="Run AI-generated desktop task",
+            detail=(
+                "The assistant wants to run generated Python code to control the desktop. "
+                "It will run as your current user and may access files, applications, and "
+                "network resources available to your account. Approve only if the task "
+                "and requested changes are clear. Execution is limited to 60 seconds."
+            ),
+            operation=lambda: run_python_code(code, timeout=60),
+            player=player,
+        )
+    except (ExecutionPolicyError, OSError, ValueError) as exc:
+        return f"Could not prepare desktop execution: {exc}"
+
+
 
 def _ask_gemini_for_desktop_action(task: str) -> str:
 
@@ -459,7 +477,10 @@ def desktop_control(
             if player:
                 player.write_log("[Desktop] Generating action...")
 
-            return _execute_generated_code("", player=player)
+            code = _ask_gemini_for_desktop_action(actual_task)
+            if code.startswith("ERROR:"):
+                return code
+            return _execute_generated_code(code, player=player)
 
         else:
             if action:
