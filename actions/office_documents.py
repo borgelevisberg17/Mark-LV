@@ -2,12 +2,199 @@
 from __future__ import annotations
 
 import html
+import os
+import platform
+import subprocess
 import uuid
 import zipfile
 from pathlib import Path
 
-from core.path_policy import PathPolicyError
+from core.path_policy import PathPolicyError, resolve_user_path, user_accessible_roots
 from actions._office_common import safe_filename, safe_output_directory, unique_output_path
+
+_OPENABLE_EXTENSIONS = {
+    ".docx", ".doc", ".rtf", ".txt", ".odt", ".pdf", ".epub",
+    ".xlsx", ".xls", ".csv", ".pptx", ".ppt", ".odp", ".ods",
+}
+_WORD_EXTENSIONS = {".docx", ".doc", ".rtf", ".txt"}
+
+
+def _find_document_path(file_path: str, filename: str) -> Path:
+    """Resolve an explicit safe path or find a named file in common user folders."""
+    if file_path.strip():
+        source = resolve_user_path(
+            file_path.strip(), roots=user_accessible_roots(), must_exist=True
+        )
+        if not source.is_file():
+            raise FileNotFoundError(f"Not a regular file: {source}")
+        return source
+
+    name = filename.strip()
+    if not name:
+        raise ValueError("Provide file_path or filename to open a document.")
+    if Path(name).name != name or "/" in name or "\\" in name or "\x00" in name:
+        raise PathPolicyError("Provide only the filename, not a path or directory.")
+
+    home = Path.home()
+    folders = [
+        home / "Documents" / "MarkLV",
+        home / "Documents",
+        home / "Desktop",
+        home / "Downloads",
+        home / "OneDrive" / "Documents",
+    ]
+    requested = Path(name)
+    candidates = []
+    for folder in folders:
+        try:
+            safe_folder = resolve_user_path(folder, roots=user_accessible_roots(), must_exist=True)
+            if not safe_folder.is_dir():
+                continue
+            # Only inspect direct children; do not recursively scan the user's files.
+            for item in safe_folder.iterdir():
+                if not item.is_file() or item.suffix.lower() not in _OPENABLE_EXTENSIONS:
+                    continue
+                exact_name = item.name.casefold() == requested.name.casefold()
+                same_stem = (
+                    not requested.suffix
+                    and item.stem.casefold() == requested.stem.casefold()
+                )
+                if exact_name or same_stem:
+                    candidates.append(item)
+        except (OSError, PathPolicyError):
+            continue
+
+    if not candidates:
+        raise FileNotFoundError(
+            f"Could not find '{name}' in Documents/MarkLV, Documents, Desktop, "
+            "Downloads, or OneDrive/Documents. Pass the full file_path if it is elsewhere."
+        )
+    # Prefer an exact name, then the most recently modified matching file.
+    candidates.sort(
+        key=lambda item: (
+            item.name.casefold() == requested.name.casefold(),
+            item.stat().st_mtime,
+        ),
+        reverse=True,
+    )
+    return resolve_user_path(
+        candidates[0], roots=user_accessible_roots(), must_exist=True
+    )
+
+
+def _convert_epub_to_docx(source: Path) -> Path:
+    """Create an editable DOCX copy from the generated EPUB without changing the EPUB."""
+    from xml.etree import ElementTree
+    from docx import Document
+    from docx.shared import Inches, Pt
+
+    if source.stat().st_size > 50 * 1024 * 1024:
+        raise ValueError("EPUB is larger than the 50 MB safe conversion limit.")
+    with zipfile.ZipFile(source, "r") as book:
+        if book.testzip() is not None:
+            raise zipfile.BadZipFile("EPUB contains a corrupt archive member.")
+        chapter_name = next(
+            (name for name in book.namelist()
+             if name.lower().endswith((".xhtml", ".html", ".htm"))
+             and "nav" not in Path(name).name.lower()),
+            None,
+        )
+        if not chapter_name:
+            raise ValueError("No readable XHTML chapter was found inside this EPUB.")
+        chapter_bytes = book.read(chapter_name)
+        if len(chapter_bytes) > 10 * 1024 * 1024:
+            raise ValueError("EPUB chapter is larger than the 10 MB safe conversion limit.")
+
+    root = ElementTree.fromstring(chapter_bytes)
+    title = ""
+    blocks = []
+    for node in root.iter():
+        tag = node.tag.rsplit("}", 1)[-1].lower()
+        if tag == "title" and not title:
+            title = "".join(node.itertext()).strip()
+        elif tag in {"h1", "h2", "h3", "h4", "p", "li", "blockquote"}:
+            text = " ".join("".join(node.itertext()).split())
+            if text:
+                blocks.append((tag, text))
+    if not title:
+        title = source.stem.replace("_", " ").replace("-", " ").strip() or "Ebook"
+    if not blocks:
+        raise ValueError("The EPUB chapter contains no readable text.")
+
+    output = unique_output_path(
+        source.parent, safe_filename(source.stem, title, ".docx")
+    )
+    document = Document()
+    section = document.sections[0]
+    section.top_margin = Inches(0.8)
+    section.bottom_margin = Inches(0.8)
+    section.left_margin = Inches(0.9)
+    section.right_margin = Inches(0.9)
+    document.core_properties.title = title
+    document.core_properties.subject = "Editable copy converted from an EPUB by Mark-LV"
+    document.add_heading(title, level=0)
+    for tag, text in blocks:
+        if tag == "h1":
+            document.add_heading(text, level=1)
+        elif tag == "h2":
+            document.add_heading(text, level=2)
+        elif tag == "h3":
+            document.add_heading(text, level=3)
+        else:
+            document.add_paragraph(text)
+    document.styles["Normal"].font.name = "Aptos"
+    document.styles["Normal"].font.size = Pt(11)
+    document.save(output)
+    verified = Document(output)
+    if not verified.paragraphs or verified.paragraphs[0].text != title:
+        output.unlink(missing_ok=True)
+        raise ValueError("Converted DOCX failed validation.")
+    return output
+
+
+def _open_document_path(source: Path, app_name: str = "") -> str:
+    """Open a validated document through its OS association, without UI key simulation."""
+    requested_app = app_name.strip().casefold()
+    suffix = source.suffix.casefold()
+    if requested_app in {"word", "microsoft word", "winword"} and suffix == ".epub":
+        try:
+            converted = _convert_epub_to_docx(source)
+        except ImportError as exc:
+            return (
+                f"Cannot convert {source.name} for Word because a document library is missing: {exc}. "
+                "Open the original EPUB with an EPUB reader instead."
+            )
+        except (OSError, ValueError, zipfile.BadZipFile) as exc:
+            return f"Could not create an editable Word copy from {source.name}: {exc}"
+        open_result = _open_document_path(converted, "word")
+        return (
+            f"Created an editable Word copy from the EPUB. Original ebook preserved.\n"
+            f"{open_result}"
+        )
+    if requested_app in {"word", "microsoft word", "winword"} and suffix not in _WORD_EXTENSIONS:
+        return (
+            f"Microsoft Word is not the recommended handler for {suffix or 'this file type'}. "
+            "Use the default application or request a supported Word document."
+        )
+
+    system = platform.system()
+    if system == "Windows":
+        os.startfile(str(source))  # type: ignore[attr-defined]
+    elif system == "Darwin":
+        subprocess.Popen(
+            ["open", str(source)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    elif system == "Linux":
+        subprocess.Popen(
+            ["xdg-open", str(source)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    else:
+        return f"Opening files is not supported on operating system '{system}'."
+    return f"Opened document: {source}\nApplication: {requested_app or 'default application'}"
 
 
 def office_documents(parameters: dict, player=None, speak=None) -> str:
@@ -24,6 +211,15 @@ def office_documents(parameters: dict, player=None, speak=None) -> str:
         return "Every content item must be a string."
 
     try:
+        if operation == "open_document":
+            source = _find_document_path(
+                str(params.get("file_path", "") or ""),
+                str(params.get("filename", "") or ""),
+            )
+            return _open_document_path(
+                source, str(params.get("app_name", "") or "")
+            )
+
         directory = safe_output_directory(output_dir)
         if operation == "create_docx":
             from docx import Document
@@ -119,7 +315,7 @@ def office_documents(parameters: dict, player=None, speak=None) -> str:
             preview = text[:12000]
             return f"DOCX: {source}\nParagraphs: {len(doc.paragraphs)}\nCharacters: {len(text)}\n\n{preview}"
 
-        return "Unsupported operation. Use create_docx, create_epub, or inspect_docx."
+        return "Unsupported operation. Use create_docx, create_epub, open_document, or inspect_docx."
     except ImportError as exc:
         return f"Required document library is unavailable: {exc}. Install python-docx to create or inspect DOCX files."
     except (OSError, ValueError, PathPolicyError, zipfile.BadZipFile) as exc:
@@ -130,16 +326,17 @@ def office_documents(parameters: dict, player=None, speak=None) -> str:
 
 TOOL = {
     "name": "office_documents",
-    "description": "Create editable Word DOCX documents and basic EPUB ebooks, or inspect an existing DOCX. Use create_docx for professional editable documents, create_epub for a simple reflowable ebook, and inspect_docx to extract paragraph text. Outputs are new files; existing files are never overwritten.",
+    "description": "Create editable Word DOCX documents and basic EPUB ebooks, open a previously created document directly from its verified path, or inspect a DOCX. For a request to open a file, call operation=open_document with the exact file_path returned when it was created, or filename if it is in Documents/MarkLV, Documents, Desktop, Downloads, or OneDrive/Documents. Do NOT open Word and simulate Ctrl+O when you can open the exact file. Use app_name=word only for .docx/.doc/.rtf/.txt; EPUB is not natively supported by Word and should open with the default EPUB reader. Use create_docx for editable Word content and create_epub for a reader-ready ebook. Outputs are new files; existing files are never overwritten.",
     "parameters": {
         "type": "OBJECT",
         "properties": {
-            "operation": {"type": "STRING", "description": "create_docx | create_epub | inspect_docx"},
+            "operation": {"type": "STRING", "description": "create_docx | create_epub | open_document | inspect_docx"},
             "title": {"type": "STRING", "description": "Document or ebook title"},
             "content": {"type": "STRING", "description": "Body text. Separate paragraphs with blank lines. For create_docx, a list of paragraph strings is also accepted by the handler."},
             "filename": {"type": "STRING", "description": "Optional filename only, without a directory path"},
             "output_dir": {"type": "STRING", "description": "Optional output folder inside the current user's home directory or OS temporary directory"},
-            "file_path": {"type": "STRING", "description": "Existing DOCX path, for inspect_docx only"}
+            "file_path": {"type": "STRING", "description": "Existing local file path for open_document or inspect_docx. Prefer the exact path returned when creating the file."},
+            "app_name": {"type": "STRING", "description": "Optional application preference for open_document, e.g. word. Leave empty to use the operating system's default application."}
         },
         "required": ["operation"]
     },
