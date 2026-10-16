@@ -7,7 +7,7 @@ file-descriptor-based operations.
 from __future__ import annotations
 
 import tempfile
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Iterable
 
 
@@ -89,8 +89,12 @@ def resolve_child_path(
     must_exist: bool = False,
 ) -> Path:
     """Resolve a relative child beneath root; reject absolute paths and traversal."""
-    child_path = Path(str(child))
-    if child_path.is_absolute() or child_path.drive:
+    child_text = str(child)
+    if not child_text.strip() or "\x00" in child_text:
+        raise PathPolicyError("A valid relative child path is required.")
+    windows_path = PureWindowsPath(child_text)
+    child_path = Path(child_text.replace("\\", "/"))
+    if child_path.is_absolute() or windows_path.is_absolute() or windows_path.drive:
         raise PathPolicyError("Absolute child paths are not allowed.")
     if any(part == ".." for part in child_path.parts):
         raise PathPolicyError("Path traversal ('..') is not allowed.")
