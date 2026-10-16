@@ -93,7 +93,12 @@ def _keyring():
 # Microsoft access/refresh tokens and resumable-upload metadata can exceed that
 # limit when serialized together. Store bounded chunks under separate entries,
 # then atomically switch a small manifest to the new generation.
-_CREDENTIAL_CHUNK_CHARS = 1800
+# keyring's Windows Credential Manager backend stores secret strings as UTF-16LE.
+# The native credential blob limit is 2,560 bytes, so 800 ASCII characters use
+# at most 1,600 bytes and leave headroom for backend/API implementation details.
+_CREDENTIAL_CHUNK_CHARS = 800
+_CREDENTIAL_CHUNK_MAX_BYTES = 1600
+_CREDENTIAL_MAX_CHUNKS = 10000
 _CREDENTIAL_CHUNK_PREFIX = _CREDENTIAL_USERNAME + ":chunk:"
 
 
@@ -109,7 +114,7 @@ def _load_cache() -> dict:
         if manifest.get("_marklv_chunked") == 1:
             generation = str(manifest.get("generation", ""))
             count = int(manifest.get("chunks", 0))
-            if not generation or count < 1 or count > 10000:
+            if not generation or count < 1 or count > _CREDENTIAL_MAX_CHUNKS:
                 return {}
             pieces = []
             for index in range(count):
@@ -136,6 +141,13 @@ def _save_cache(cache: dict) -> None:
         serialized[i:i + _CREDENTIAL_CHUNK_CHARS]
         for i in range(0, len(serialized), _CREDENTIAL_CHUNK_CHARS)
     ] or ["{}"]
+    if len(chunks) > _CREDENTIAL_MAX_CHUNKS:
+        raise RuntimeError(
+            "The Microsoft credential cache is too large for safe Windows Credential Manager storage. "
+            "Remove completed resumable-upload sessions and try again."
+        )
+    if any(len(chunk.encode("utf-16-le")) > _CREDENTIAL_CHUNK_MAX_BYTES for chunk in chunks):
+        raise RuntimeError("Internal credential chunk exceeds the safe Windows Credential Manager byte limit.")
 
     previous_manifest = None
     previous_raw = keyring.get_password(_CREDENTIAL_SERVICE, _CREDENTIAL_USERNAME)
@@ -147,30 +159,50 @@ def _save_cache(cache: dict) -> None:
         except (ValueError, TypeError):
             pass
 
-    # Write all new pieces first. Every credential blob stays below the
-    # Windows Credential Manager limit, even when the full cache is much larger.
-    for index, chunk in enumerate(chunks):
+    # Write all new pieces first. Every UTF-16LE credential blob is explicitly
+    # checked against the conservative 1,600-byte ceiling before reaching WinCred.
+    # The old manifest remains authoritative until all chunks are safely written.
+    try:
+        for index, chunk in enumerate(chunks):
+            keyring.set_password(
+                _CREDENTIAL_SERVICE,
+                f"{_CREDENTIAL_CHUNK_PREFIX}{generation}:{index}",
+                chunk,
+            )
+
         keyring.set_password(
             _CREDENTIAL_SERVICE,
-            f"{_CREDENTIAL_CHUNK_PREFIX}{generation}:{index}",
-            chunk,
+            _CREDENTIAL_USERNAME,
+            json.dumps({
+                "_marklv_chunked": 1,
+                "generation": generation,
+                "chunks": len(chunks),
+            }, separators=(",", ":")),
         )
-
-    keyring.set_password(
-        _CREDENTIAL_SERVICE,
-        _CREDENTIAL_USERNAME,
-        json.dumps({
-            "_marklv_chunked": 1,
-            "generation": generation,
-            "chunks": len(chunks),
-        }, separators=(",", ":")),
-    )
+    except Exception as exc:
+        # If this is a new generation, remove any partial chunks. Never remove
+        # chunks belonging to the currently committed manifest.
+        if not previous_manifest or str(previous_manifest.get("generation", "")) != generation:
+            for index in range(len(chunks)):
+                try:
+                    keyring.delete_password(
+                        _CREDENTIAL_SERVICE,
+                        f"{_CREDENTIAL_CHUNK_PREFIX}{generation}:{index}",
+                    )
+                except Exception:
+                    pass
+        raise RuntimeError(
+            "Windows could not securely save the Microsoft sign-in credentials. "
+            "No token was confirmed as stored; verify Windows Credential Manager "
+            "is available and retry sign-in. Original error: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
 
     # Only remove the previous generation after the new manifest is committed.
     if previous_manifest:
         old_generation = str(previous_manifest.get("generation", ""))
         old_count = int(previous_manifest.get("chunks", 0))
-        if old_generation and old_generation != generation and 0 <= old_count <= 10000:
+        if old_generation and old_generation != generation and 0 <= old_count <= _CREDENTIAL_MAX_CHUNKS:
             for index in range(old_count):
                 try:
                     keyring.delete_password(
