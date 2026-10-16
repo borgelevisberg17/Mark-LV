@@ -3226,6 +3226,7 @@ class MainWindow(QMainWindow):
         self._update_metrics()
 
         self._office_login_result_sig.connect(self._on_office_login_result)
+        QTimer.singleShot(0, self._refresh_office_session_state)
         self._log_sig.connect(self._log.append_log)
         self._state_sig.connect(self._apply_state)
         self._content_sig.connect(self._show_content)
@@ -3933,6 +3934,17 @@ class MainWindow(QMainWindow):
             self._proc_lbl.setText("PROC  --")
 
 
+    def _refresh_office_session_state(self) -> None:
+        """Resolve the persisted Microsoft session at startup without blocking Qt."""
+        def work():
+            try:
+                from actions.office_graph import office_graph
+                result = office_graph({"operation": "session_status"})
+            except Exception as exc:
+                result = json.dumps({"connected": None, "error": f"Session check failed: {type(exc).__name__}: {str(exc)[:250]}"})
+            self._office_login_result_sig.emit("session_status", str(result))
+        threading.Thread(target=work, daemon=True, name="microsoft-session-state").start()
+
     def _open_office_login(self) -> None:
         """Open a small, guided Microsoft device-code sign-in dialog."""
         dialog = getattr(self, "_office_login_dialog", None)
@@ -4093,7 +4105,7 @@ class MainWindow(QMainWindow):
 
     def _on_office_login_result(self, operation: str, result: str) -> None:
         """Render Microsoft auth state on Qt's UI thread; never block the HUD on HTTP."""
-        if not hasattr(self, "_office_login_status"):
+        if not hasattr(self, "_office_login_status") and operation != "session_status":
             return
 
         if operation == "session_status":
@@ -4106,6 +4118,8 @@ class MainWindow(QMainWindow):
                 name = str(state.get("display_name") or "Microsoft account")
                 email = str(state.get("email") or "")
                 self._set_office_account_state(True, name, email)
+                if not hasattr(self, "_office_login_status"):
+                    return
                 self._office_login_status.setText("Microsoft account connected.")
                 self._office_login_code.setText(name + (("\\n" + email) if email else ""))
                 self._office_login_code.setStyleSheet(f"color: {C.GREEN}; background: transparent;")
@@ -4116,6 +4130,8 @@ class MainWindow(QMainWindow):
                 self._office_login_reconnect_btn.hide()
             elif state.get("connected") is False:
                 self._set_office_account_state(False)
+                if not hasattr(self, "_office_login_status"):
+                    return
                 message = str(state.get("message") or "No Microsoft account is connected.")
                 self._office_login_code.setText("Not connected")
                 self._office_login_code.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
@@ -4155,7 +4171,7 @@ class MainWindow(QMainWindow):
             return
 
         self._office_login_status.setText(result)
-        match = re.search(r"Open\\s+(https?://\\S+)\\s+and enter code\\s+([A-Z0-9-]+)", result, re.IGNORECASE)
+        match = re.search(r"Open\s+(https?://\S+)\s+and enter code\s+([A-Z0-9-]+)", result, re.IGNORECASE)
         if match:
             self._office_login_url = match.group(1).rstrip(".,")
             self._office_login_code.setText("Verification code:  " + match.group(2).rstrip("."))
