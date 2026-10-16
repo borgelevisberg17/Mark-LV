@@ -280,7 +280,19 @@ def _poll_login() -> str:
                 "scope": granted_scope_text,
                 "scopes": granted_scopes,
             }
-            _save_cache(cache)
+            try:
+                _save_cache(cache)
+            except Exception as exc:
+                # The device code has already been redeemed. Do not keep polling
+                # it or imply that authentication completed successfully.
+                # Never fall back to plaintext token storage.
+                _PENDING_FLOW = None
+                return (
+                    "Microsoft authorization succeeded, but Mark-LV could not securely save the tokens "
+                    "in the operating-system credential vault. No plaintext fallback was used. "
+                    "Correct the credential-storage problem and start a new sign-in. "
+                    f"Storage error: {type(exc).__name__}: {exc}"
+                )
             _PENDING_FLOW = None
             return "Microsoft personal account connected. Delegated tokens were stored in the operating system credential vault."
         error = payload.get("error", "")
