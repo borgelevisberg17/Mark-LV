@@ -10,11 +10,11 @@ from core.path_policy import PathPolicyError
 class OfficeActionContractTests(unittest.TestCase):
     def test_office_actions_declare_unique_valid_tools(self):
         from core.action_loader import _validate
-        from actions import office_documents, office_spreadsheets, office_presentations, image_tools, document_conversion, office_graph, office_graph
+        from actions import office_documents, office_spreadsheets, office_presentations, image_tools, document_conversion, office_graph
 
         modules = [
             office_documents, office_spreadsheets, office_presentations,
-            image_tools, document_conversion,
+            image_tools, document_conversion, office_graph,
         ]
         names = set()
         for module in modules:
