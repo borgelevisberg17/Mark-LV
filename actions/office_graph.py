@@ -237,7 +237,8 @@ def _clear_cache() -> None:
                             _CREDENTIAL_SERVICE,
                             f"{_CREDENTIAL_CHUNK_PREFIX}{generation}:{index}",
                         )
-                    except Exception:
+                    except KeyError:
+                        # An already-missing chunk contains nothing to retain.
                         pass
     try:
         keyring.delete_password(_CREDENTIAL_SERVICE, _CREDENTIAL_USERNAME)
@@ -395,10 +396,19 @@ def _account_status() -> dict:
     profile = _graph("GET", "/me", token)
     name = str(profile.get("displayName") or "Microsoft account").strip()
     email = str(profile.get("mail") or profile.get("userPrincipalName") or "").strip()
-    cache["account_name"] = name
-    cache["account_email"] = email
-    cache["account_id"] = str(profile.get("id") or "")
-    _save_cache(cache)
+    # _access_token may have refreshed and persisted credentials. Reload here so
+    # writing profile metadata never overwrites the newly rotated token.
+    cache = _load_cache()
+    account_id = str(profile.get("id") or "")
+    if (
+        cache.get("account_name") != name
+        or cache.get("account_email") != email
+        or cache.get("account_id") != account_id
+    ):
+        cache["account_name"] = name
+        cache["account_email"] = email
+        cache["account_id"] = account_id
+        _save_cache(cache)
     return {"connected": True, "display_name": name, "email": email, "message": "Microsoft account connected."}
 
 
