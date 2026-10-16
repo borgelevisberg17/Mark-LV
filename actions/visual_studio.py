@@ -14,7 +14,10 @@ from core.path_policy import PathPolicyError, resolve_user_path, user_accessible
 _MAX_PROMPT = 12000
 _MAX_SOURCE_BYTES = 20 * 1024 * 1024
 _MAX_OUTPUT_BYTES = 30 * 1024 * 1024
+_MAX_PIXELS = 100_000_000
 _MODEL_DEFAULT = "gemini-2.5-flash-image"
+_ALLOWED_ASPECT_RATIOS = {"1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"}
+_ALLOWED_IMAGE_SIZES = {"1K", "2K", "4K"}
 _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 
 
@@ -65,6 +68,120 @@ def _extract_image(response) -> tuple[bytes, str]:
     raise ValueError("The image model returned no usable image. Try a clearer prompt or another model.")
 
 
+def _font(size: int):
+    """Choose a dependable local font without requiring font installation."""
+    from PIL import ImageFont
+    candidates = [
+        Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts" / "arial.ttf",
+        Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts" / "segoeui.ttf",
+        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+        Path("/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf"),
+    ]
+    for candidate in candidates:
+        try:
+            if candidate.is_file():
+                return ImageFont.truetype(str(candidate), size=size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
+def _compose_cover_text(image_path: Path, params: dict) -> Path:
+    """Add readable, deterministic cover typography while retaining the raw asset."""
+    title = str(params.get("cover_title", "") or "").strip()
+    subtitle = str(params.get("cover_subtitle", "") or "").strip()
+    author = str(params.get("cover_author", "") or "").strip()
+    if not any((title, subtitle, author)):
+        return image_path
+    from PIL import Image, ImageDraw
+    with Image.open(image_path) as opened:
+        opened.load()
+        if opened.width * opened.height > _MAX_PIXELS:
+            raise ValueError("Generated image exceeds the safe pixel limit.")
+        base = opened.convert("RGBA")
+    width, height = base.size
+    overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    pixels = overlay.load()
+    start_y = int(height * 0.52)
+    for y in range(start_y, height):
+        alpha = int(35 + 175 * ((y - start_y) / max(1, height - start_y)))
+        for x in range(width):
+            pixels[x, y] = (8, 12, 20, alpha)
+    composed = Image.alpha_composite(base, overlay)
+    draw = ImageDraw.Draw(composed)
+    margin = max(28, int(width * 0.075))
+    available = max(100, width - margin * 2)
+    title_font = _font(max(20, min(84, int(width * 0.075))))
+    subtitle_font = _font(max(14, min(42, int(width * 0.035))))
+    author_font = _font(max(14, min(36, int(width * 0.028))))
+
+    def wrap(text: str, font, max_width: int):
+        lines, current = [], ""
+        for word in text.split():
+            candidate = f"{current} {word}".strip()
+            if current and draw.textbbox((0, 0), candidate, font=font)[2] > max_width:
+                lines.append(current)
+                current = word
+            else:
+                current = candidate
+        if current:
+            lines.append(current)
+        return lines
+
+    blocks = []
+    if title:
+        blocks.append((title_font, wrap(title, title_font, available), (255, 255, 255, 255), max(4, int(height * 0.012))))
+    if subtitle:
+        blocks.append((subtitle_font, wrap(subtitle, subtitle_font, available), (235, 239, 245, 255), max(3, int(height * 0.008))))
+    if author:
+        blocks.append((author_font, wrap(author, author_font, available), (240, 196, 90, 255), max(4, int(height * 0.018))))
+    line_gap = max(4, int(height * 0.008))
+    measured, total = [], 0
+    for font, lines, fill, gap in blocks:
+        heights = [draw.textbbox((0, 0), line, font=font)[3] - draw.textbbox((0, 0), line, font=font)[1] for line in lines]
+        block_height = sum(heights) + line_gap * max(0, len(lines) - 1)
+        measured.append((font, lines, fill, gap, heights))
+        total += block_height + gap
+    y = max(start_y + int(height * 0.04), height - margin - total)
+    for font, lines, fill, gap, heights in measured:
+        for line, line_height in zip(lines, heights):
+            draw.text((margin, y), line, font=font, fill=fill, stroke_width=max(1, width // 1200), stroke_fill=(0, 0, 0, 180))
+            y += line_height + line_gap
+        y += gap
+    output = unique_output_path(image_path.parent, safe_filename(image_path.stem + "-designed", "designed-cover", image_path.suffix))
+    temporary = output.with_name(f".{output.stem}-{uuid.uuid4().hex}.tmp{output.suffix}")
+    try:
+        if output.suffix.lower() in {".jpg", ".jpeg"}:
+            composed.convert("RGB").save(temporary, format="JPEG", quality=94, optimize=True)
+        elif output.suffix.lower() == ".webp":
+            composed.save(temporary, format="WEBP", quality=94, method=6)
+        else:
+            composed.save(temporary, format="PNG", optimize=True)
+        with Image.open(temporary) as check:
+            check.verify()
+        os.replace(temporary, output)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return output
+
+
+def _preflight_target(raw_target: str, slide_index=None) -> Path | None:
+    """Validate an Office target before consuming image-generation quota."""
+    if not raw_target.strip():
+        return None
+    target = resolve_user_path(raw_target.strip(), roots=user_accessible_roots(), must_exist=True)
+    if not target.is_file() or target.suffix.lower() not in {".docx", ".pptx"}:
+        raise ValueError("target_file_path must point to an existing .docx or .pptx file.")
+    if target.stat().st_size > 100 * 1024 * 1024:
+        raise ValueError("Target Office file exceeds the 100 MiB limit.")
+    if target.suffix.lower() == ".pptx" and slide_index is not None:
+        from pptx import Presentation
+        presentation = Presentation(target)
+        if isinstance(slide_index, bool) or not isinstance(slide_index, int) or not 0 <= slide_index < len(presentation.slides):
+            raise ValueError(f"slide_index must be between 0 and {len(presentation.slides) - 1}.")
+    return target
+
+
 def _generate(params: dict) -> tuple[Path, str]:
     prompt = str(params.get("prompt", "") or "").strip()
     if not prompt:
@@ -90,10 +207,24 @@ def _generate(params: dict) -> tuple[Path, str]:
     model = str(params.get("model", "") or _MODEL_DEFAULT).strip()
     if not model or len(model) > 100 or any(ch.isspace() for ch in model):
         raise ValueError("model must be a valid model identifier.")
+    aspect_ratio = str(params.get("aspect_ratio", "") or "").strip()
+    image_size = str(params.get("image_size", "") or "").strip().upper()
+    if aspect_ratio and aspect_ratio not in _ALLOWED_ASPECT_RATIOS:
+        raise ValueError("Unsupported aspect_ratio. Use a documented image ratio.")
+    if image_size and image_size not in _ALLOWED_IMAGE_SIZES:
+        raise ValueError("image_size must be 1K, 2K or 4K.")
+    config_options = {"response_modalities": ["TEXT", "IMAGE"]}
+    if aspect_ratio or image_size:
+        image_config = {}
+        if aspect_ratio:
+            image_config["aspect_ratio"] = aspect_ratio
+        if image_size:
+            image_config["image_size"] = image_size
+        config_options["image_config"] = types.ImageConfig(**image_config)
     response = client.models.generate_content(
         model=model,
         contents=contents,
-        config=types.GenerateContentConfig(response_modalities=["IMAGE"]),
+        config=types.GenerateContentConfig(**config_options),
     )
     image_bytes, mime = _extract_image(response)
     extension = { "image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp" }[mime]
@@ -110,11 +241,15 @@ def _generate(params: dict) -> tuple[Path, str]:
         from PIL import Image
         with Image.open(temporary) as image:
             image.verify()
+        with Image.open(temporary) as image:
+            if image.width * image.height > _MAX_PIXELS:
+                raise ValueError("Generated image exceeds the safe pixel limit.")
+            image.load()
     except Exception:
         temporary.unlink(missing_ok=True)
         raise
     os.replace(temporary, output)
-    return output, mime
+    return _compose_cover_text(output, params), mime
 
 
 def _insert_docx(image_path: Path, raw_target: str) -> Path:
