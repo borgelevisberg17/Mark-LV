@@ -27,7 +27,7 @@ class OfficeActionContractTests(unittest.TestCase):
         self.assertEqual(5, len(names))
 
     def test_safe_filename_rejects_paths_and_traversal(self):
-        for unsafe in ("../report", r"..\report", "C:\report", "/tmp/report"):
+        for unsafe in ("../report", r"..\report", r"C:\report", "/tmp/report"):
             with self.subTest(unsafe=unsafe):
                 with self.assertRaises(PathPolicyError):
                     safe_filename(unsafe, "report", ".docx")
