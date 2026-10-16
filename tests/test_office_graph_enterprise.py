@@ -68,12 +68,11 @@ class Microsoft365OperationTests(unittest.TestCase):
         self.assertEqual("text/html; charset=utf-8", self.graph.call_args.kwargs["headers"]["Content-Type"])
 
     def test_forms_open_uses_official_web_interface_without_graph_token(self):
-        with patch("webbrowser.open", return_value=True) as browser:
+        with patch("webbrowser.open", return_value=True) as browser, patch.object(office_graph, "_access_token") as token:
             result = office_graph.office_graph({"operation": "forms_open"})
         self.assertIn("Forms", result)
         browser.assert_called_once_with("https://forms.office.com/")
-        self.token_patch.stop()
-        self.assertFalse(self.token_patch.target.called if hasattr(self.token_patch.target, "called") else False)
+        token.assert_not_called()
 
 
 if __name__ == "__main__":
