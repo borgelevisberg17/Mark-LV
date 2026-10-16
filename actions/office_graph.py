@@ -32,14 +32,14 @@ _MAX_UPLOAD_BYTES = 4 * 1024 * 1024
 _UPLOAD_CHUNK_BYTES = 5 * 1024 * 1024  # 16 x 320 KiB, as required by Graph
 
 _ALL_SCOPES = (
-    "User.Read", "Calendars.ReadWrite", "Mail.Read", "Mail.Send",
+    "User.Read", "Calendars.ReadWrite", "Mail.ReadWrite", "Mail.Send",
     "Files.ReadWrite", "Notes.ReadWrite", "offline_access",
 )
 _SCOPES_BY_SET = {
     "all": _ALL_SCOPES,
     "profile": ("User.Read", "offline_access"),
     "calendar": ("Calendars.ReadWrite", "offline_access"),
-    "mail_read": ("Mail.Read", "offline_access"),
+    "mail_read": ("Mail.ReadWrite", "offline_access"),
     "mail_send": ("Mail.Send", "offline_access"),
     "drive": ("Files.ReadWrite", "offline_access"),
     "onenote": ("Notes.ReadWrite", "offline_access"),
@@ -48,9 +48,22 @@ _REQUIRED = {
     "profile": {"User.Read"},
     "calendar_list": {"Calendars.ReadWrite"},
     "calendar_create": {"Calendars.ReadWrite"},
-    "mail_list": {"Mail.Read"},
+    "calendar_update": {"Calendars.ReadWrite"},
+    "calendar_delete": {"Calendars.ReadWrite"},
+    "mail_list": {"Mail.ReadWrite"},
+    "mail_search": {"Mail.ReadWrite"},
+    "mail_read_message": {"Mail.ReadWrite"},
+    "mail_mark_read": {"Mail.ReadWrite"},
+    "mail_move": {"Mail.ReadWrite"},
+    "mail_delete": {"Mail.ReadWrite"},
+    "mail_reply": {"Mail.Send"},
     "mail_send": {"Mail.Send"},
     "drive_list": {"Files.ReadWrite"},
+    "drive_search": {"Files.ReadWrite"},
+    "drive_create_folder": {"Files.ReadWrite"},
+    "drive_rename": {"Files.ReadWrite"},
+    "drive_move": {"Files.ReadWrite"},
+    "drive_delete": {"Files.ReadWrite"},
     "drive_upload": {"Files.ReadWrite"},
     "drive_upload_resume": {"Files.ReadWrite"},
     "drive_download": {"Files.ReadWrite"},
@@ -642,12 +655,229 @@ def office_graph(parameters: dict, player=None, speak=None) -> str:
     if required is None:
         if operation in {"forms_create", "forms_edit"}:
             return "General Microsoft Forms creation/editing is not exposed by the supported public Microsoft Graph API; this action is intentionally unavailable."
-        return "Unsupported operation. Available: status, start_login, poll_login, profile, calendar_list, calendar_create, mail_list, mail_send, drive_list, drive_upload, drive_download, onenote_list."
+        return "Unsupported operation. Available: status, session_status, start_login, poll_login, logout, profile, calendar_list/create/update/delete, mail_list/search/read_message/mark_read/move/delete/reply/send, drive_list/search/create_folder/rename/move/delete/upload/upload_resume/download, onenote_list/sections/pages/create_page, forms_open."
 
     try:
         token, error = _access_token(required)
         if not token:
             return error
+
+
+        if operation == "calendar_update":
+            event_id = str(params.get("event_id", "")).strip()
+            if not event_id:
+                return "calendar_update requires event_id from calendar_list."
+            patch = {}
+            subject = params.get("subject")
+            start = str(params.get("start", "")).strip()
+            end = str(params.get("end", "")).strip()
+            timezone = str(params.get("time_zone", "Africa/Luanda")).strip() or "Africa/Luanda"
+            if subject is not None:
+                if not str(subject).strip():
+                    return "A supplied subject cannot be empty."
+                patch["subject"] = str(subject).strip()[:255]
+            if start:
+                patch["start"] = {"dateTime": start, "timeZone": timezone}
+            if end:
+                patch["end"] = {"dateTime": end, "timeZone": timezone}
+            if start and end and end <= start:
+                return "Event end must be later than start."
+            if "body" in params:
+                patch["body"] = {"contentType": "text", "content": str(params.get("body") or "")[:4000]}
+            if "location" in params:
+                patch["location"] = {"displayName": str(params.get("location") or "")[:500]}
+            if not patch:
+                return "Provide at least one event field to update."
+            key = "office_graph:calendar_update:" + _digest(event_id + json.dumps(patch, sort_keys=True))
+            return request_confirmation(
+                key, "Update Outlook calendar event",
+                "Update the selected Outlook event (ID " + event_id[:80] + ") with the supplied fields?",
+                lambda: "Updated Outlook event: " + json.dumps(_graph("PATCH", "/me/events/" + quote(event_id, safe=""), token, json_body=patch), ensure_ascii=False)[:1200],
+                category="network", permissions=("network",),
+            )
+
+        if operation == "calendar_delete":
+            event_id = str(params.get("event_id", "")).strip()
+            if not event_id:
+                return "calendar_delete requires event_id from calendar_list."
+            key = "office_graph:calendar_delete:" + _digest(event_id)
+            return request_confirmation(
+                key, "Cancel Outlook calendar event",
+                "Cancel/delete Outlook event ID " + event_id[:100] + "? This cannot be undone from Mark-LV.",
+                lambda: "Outlook event deleted." if _graph("DELETE", "/me/events/" + quote(event_id, safe=""), token) == {} else "Outlook event deleted.",
+                category="network", permissions=("network",),
+            )
+
+        if operation == "mail_search":
+            query = str(params.get("query", "")).strip()
+            if not query:
+                return "mail_search requires a search query."
+            if len(query) > 200:
+                return "Search query is limited to 200 characters."
+            top = max(1, min(25, int(params.get("limit", 10))))
+            escaped_query = query.replace("\\", "\\\\").replace('"', '\\"')
+            data = _graph("GET", "/me/messages", token, params={"$search": '"' + escaped_query + '"', "$top": str(top), "$select": "id,subject,from,receivedDateTime,isRead,bodyPreview"}, headers={"ConsistencyLevel": "eventual"})
+            messages = data.get("value", [])
+            return "Outlook search results:\\n" + "\\n".join(
+                "- " + str(m.get("receivedDateTime") or "") + " | " + str(m.get("from", {}).get("emailAddress", {}).get("address", "")) + " | " + str(m.get("subject") or "(no subject)") + " | id=" + str(m.get("id", "")) + " | " + str(m.get("bodyPreview") or "")[:140]
+                for m in messages[:top]
+            ) if messages else "No matching Outlook messages."
+
+        if operation == "mail_read_message":
+            message_id = str(params.get("message_id", "")).strip()
+            if not message_id:
+                return "mail_read_message requires message_id from mail_list or mail_search."
+            data = _graph("GET", "/me/messages/" + quote(message_id, safe=""), token, params={"$select": "id,subject,from,toRecipients,ccRecipients,receivedDateTime,body,isRead,hasAttachments"})
+            return "Outlook message:\\n" + json.dumps(data, ensure_ascii=False)[:12000]
+
+        if operation == "mail_mark_read":
+            message_id = str(params.get("message_id", "")).strip()
+            if not message_id:
+                return "mail_mark_read requires message_id."
+            is_read = params.get("is_read", True) is True
+            _graph("PATCH", "/me/messages/" + quote(message_id, safe=""), token, json_body={"isRead": is_read})
+            return "Outlook message marked " + ("read." if is_read else "unread.")
+
+        if operation == "mail_move":
+            message_id = str(params.get("message_id", "")).strip()
+            destination_id = str(params.get("destination_id", "")).strip()
+            if not message_id or not destination_id:
+                return "mail_move requires message_id and destination_id (folder ID)."
+            key = "office_graph:mail_move:" + _digest(message_id + destination_id)
+            return request_confirmation(
+                key, "Move Outlook email",
+                "Move the selected email to Outlook folder ID " + destination_id[:100] + "?",
+                lambda: "Moved Outlook email: " + json.dumps(_graph("POST", "/me/messages/" + quote(message_id, safe="") + "/move", token, json_body={"destinationId": destination_id}), ensure_ascii=False)[:800],
+                category="network", permissions=("network",),
+            )
+
+        if operation == "mail_delete":
+            message_id = str(params.get("message_id", "")).strip()
+            if not message_id:
+                return "mail_delete requires message_id."
+            key = "office_graph:mail_delete:" + _digest(message_id)
+            return request_confirmation(
+                key, "Delete Outlook email",
+                "Move the selected Outlook email to Deleted Items? Message ID " + message_id[:100] + ".",
+                lambda: "Outlook email moved to Deleted Items." if _graph("DELETE", "/me/messages/" + quote(message_id, safe=""), token) == {} else "Outlook email moved to Deleted Items.",
+                category="network", permissions=("network",),
+            )
+
+        if operation == "mail_reply":
+            message_id = str(params.get("message_id", "")).strip()
+            body = str(params.get("body", "")).strip()
+            if not message_id or not body:
+                return "mail_reply requires message_id and a non-empty body."
+            if len(body) > 20000:
+                return "Reply body exceeds the 20,000 character limit."
+            key = "office_graph:mail_reply:" + _digest(message_id + body)
+            return request_confirmation(
+                key, "Reply to Outlook email",
+                "Send a reply to the selected Outlook conversation? Review the reply text before confirming.",
+                lambda: "Outlook reply accepted for sending." if _graph("POST", "/me/messages/" + quote(message_id, safe="") + "/reply", token, json_body={"comment": body}) == {} else "Outlook reply accepted for sending.",
+                category="network", permissions=("network",),
+            )
+
+        if operation == "drive_search":
+            query = str(params.get("query", "")).strip()
+            if not query:
+                return "drive_search requires a file or folder search query."
+            if len(query) > 200:
+                return "Search query is limited to 200 characters."
+            endpoint = "/me/drive/root/search(q='" + quote(query.replace("'", "''"), safe="") + "')"
+            data = _graph("GET", endpoint, token, params={"$top": "50", "$select": "id,name,size,file,folder,lastModifiedDateTime,webUrl,parentReference"})
+            items = data.get("value", [])
+            return "OneDrive search results:\\n" + "\\n".join(
+                "- " + str(i.get("name") or "") + " | " + ("folder" if i.get("folder") is not None else "file") + " | id=" + str(i.get("id") or "") + " | " + str(i.get("webUrl") or "")
+                for i in items[:50]
+            ) if items else "No matching OneDrive items."
+
+        if operation == "drive_create_folder":
+            folder_name = str(params.get("name", "")).strip()
+            parent_path = str(params.get("folder", "") or "").strip().strip("/")
+            if not folder_name or folder_name in {".", ".."} or "/" in folder_name or "\\\\" in folder_name:
+                return "drive_create_folder requires a single safe folder name in name."
+            parent_endpoint = "/me/drive/root/children"
+            if parent_path:
+                parent_endpoint = "/me/drive/root:/" + quote(_safe_remote_path(parent_path), safe="/") + ":/children"
+            key = "office_graph:drive_create_folder:" + _digest(parent_endpoint + folder_name)
+            return request_confirmation(
+                key, "Create OneDrive folder",
+                "Create folder '" + folder_name[:120] + "' in '" + (parent_path or "OneDrive root") + "'?",
+                lambda: "Created OneDrive folder: " + json.dumps(_graph("POST", parent_endpoint, token, json_body={"name": folder_name, "folder": {}, "@microsoft.graph.conflictBehavior": "fail"}), ensure_ascii=False)[:1000],
+                category="network", permissions=("network",),
+            )
+
+        if operation in {"drive_rename", "drive_move", "drive_delete"}:
+            item_id = str(params.get("item_id", "")).strip()
+            if not item_id:
+                return operation + " requires item_id from drive_list or drive_search."
+            patch = {}
+            if operation == "drive_rename":
+                new_name = str(params.get("name", "")).strip()
+                if not new_name or new_name in {".", ".."} or "/" in new_name or "\\\\" in new_name:
+                    return "drive_rename requires a safe single-segment name."
+                patch["name"] = new_name
+            elif operation == "drive_move":
+                parent_id = str(params.get("parent_id", "")).strip()
+                if not parent_id:
+                    return "drive_move requires the destination folder's parent_id."
+                patch["parentReference"] = {"id": parent_id}
+            key = "office_graph:" + operation + ":" + _digest(item_id + json.dumps(patch, sort_keys=True))
+            if operation == "drive_delete":
+                return request_confirmation(
+                    key, "Delete OneDrive item",
+                    "Move OneDrive item ID " + item_id[:100] + " to the recycle bin?",
+                    lambda: "OneDrive item moved to the recycle bin." if _graph("DELETE", "/me/drive/items/" + quote(item_id, safe=""), token) == {} else "OneDrive item moved to the recycle bin.",
+                    category="network", permissions=("network",),
+                )
+            return request_confirmation(
+                key, "Organize OneDrive item",
+                ("Rename OneDrive item to '" + patch["name"] + "'?" if operation == "drive_rename" else "Move OneDrive item to destination folder ID " + patch["parentReference"]["id"][:100] + "?"),
+                lambda: "Updated OneDrive item: " + json.dumps(_graph("PATCH", "/me/drive/items/" + quote(item_id, safe=""), token, json_body=patch), ensure_ascii=False)[:1000],
+                category="network", permissions=("network",),
+            )
+
+        if operation == "onenote_sections":
+            notebook_id = str(params.get("notebook_id", "")).strip()
+            endpoint = "/me/onenote/sections"
+            if notebook_id:
+                endpoint = "/me/onenote/notebooks/" + quote(notebook_id, safe="") + "/sections"
+            data = _graph("GET", endpoint, token, params={"$top": "50"})
+            items = data.get("value", [])
+            return "OneNote sections:\\n" + "\\n".join("- " + str(x.get("displayName") or "") + " | id=" + str(x.get("id") or "") for x in items[:50]) if items else "No OneNote sections returned."
+
+        if operation == "onenote_pages":
+            section_id = str(params.get("section_id", "")).strip()
+            if not section_id:
+                return "onenote_pages requires section_id from onenote_sections."
+            data = _graph("GET", "/me/onenote/sections/" + quote(section_id, safe="") + "/pages", token, params={"$top": "50"})
+            pages = data.get("value", [])
+            return "OneNote pages:\\n" + "\\n".join("- " + str(p.get("title") or "") + " | id=" + str(p.get("id") or "") + " | " + str(p.get("webUrl") or "") for p in pages[:50]) if pages else "No OneNote pages returned."
+
+        if operation == "onenote_create_page":
+            section_id = str(params.get("section_id", "")).strip()
+            title = str(params.get("title", "")).strip()
+            body = str(params.get("body", "") or "").strip()
+            if not section_id or not title:
+                return "onenote_create_page requires section_id and title."
+            if len(title) > 200 or len(body) > 20000:
+                return "OneNote page title/body exceeds supported limits."
+            safe_title = html.escape(title)
+            safe_body = "".join("<p>" + html.escape(part.strip()) + "</p>" for part in body.split("\\n\\n") if part.strip())
+            page_html = '<html><head><title>' + safe_title + '</title></head><body><h1>' + safe_title + '</h1>' + safe_body + '</body></html>'
+            key = "office_graph:onenote_create_page:" + _digest(section_id + title + body)
+            return request_confirmation(
+                key, "Create OneNote page",
+                "Create page '" + title[:120] + "' in the selected OneNote section?",
+                lambda: "Created OneNote page: " + json.dumps(_graph("POST", "/me/onenote/sections/" + quote(section_id, safe="") + "/pages", token, data=page_html, headers={"Content-Type": "text/html; charset=utf-8"}), ensure_ascii=False)[:1000],
+                category="network", permissions=("network",),
+            )
+
+        if operation == "forms_open":
+            import webbrowser
+            opened = webbrowser.open("https://forms.office.com/")
+            return "Opened Microsoft Forms in the default browser. Form creation/editing must be completed through the supported Forms web interface; generic Forms authoring is not available in Microsoft Graph v1.0."
 
         if operation == "profile":
             data = _graph("GET", "/me", token)
@@ -810,20 +1040,31 @@ def office_graph(parameters: dict, player=None, speak=None) -> str:
 
 TOOL = {
     "name": "office_graph",
-    "description": "Connect Mark-LV to a personal Microsoft account using OAuth device-code sign-in, then read Outlook messages, create Outlook calendar events, inspect OneDrive, upload/download files (large uploads support resumable sessions), and list OneNote notebooks where Microsoft Graph supports the account. Email sending, event creation and uploads require explicit UI confirmation. Configure a public-client app ID first. General Microsoft Forms creation is not supported.",
+    "description": "Connect Mark-LV to a personal Microsoft account using OAuth device-code sign-in, then manage Outlook events and messages, organize OneDrive items, list/create OneNote pages, and open the supported Microsoft Forms web interface. Writes, deletes, moves, replies, uploads and event changes require explicit UI confirmation. Configure a public-client app ID first. Forms authoring is routed to forms.office.com because generic form creation is not available through the supported Graph API.",
     "parameters": {
         "type": "OBJECT",
         "properties": {
-            "operation": {"type": "STRING", "description": "status | session_status | start_login | poll_login | logout | profile | calendar_list | calendar_create | mail_list | mail_send | drive_list | drive_upload | drive_upload_resume | drive_download | onenote_list | forms_create"},
+            "operation": {"type": "STRING", "description": "status | session_status | start_login | poll_login | logout | profile | calendar_list | calendar_create | calendar_update | calendar_delete | mail_list | mail_search | mail_read_message | mail_mark_read | mail_move | mail_delete | mail_reply | mail_send | drive_list | drive_search | drive_create_folder | drive_rename | drive_move | drive_delete | drive_upload | drive_upload_resume | drive_download | onenote_list | onenote_sections | onenote_pages | onenote_create_page | forms_open"},
             "scope_set": {"type": "STRING", "description": "For start_login: all | profile | calendar | mail_read | mail_send | drive | onenote; defaults to all"},
             "start": {"type": "STRING", "description": "ISO 8601 start datetime for calendar_list/calendar_create"},
-            "end": {"type": "STRING", "description": "ISO 8601 end datetime for calendar_list/calendar_create"},
+            "end": {"type": "STRING", "description": "ISO 8601 end datetime for calendar_list/calendar_create/calendar_update"},
+            "event_id": {"type": "STRING", "description": "Existing Outlook event ID for update/delete"},
+            "message_id": {"type": "STRING", "description": "Existing Outlook message ID for read/move/delete/reply"},
+            "destination_id": {"type": "STRING", "description": "Outlook destination mail folder ID for mail_move"},
+            "is_read": {"type": "BOOLEAN", "description": "mail_mark_read: true to mark read, false to mark unread"},
+            "query": {"type": "STRING", "description": "Search text for mail_search or drive_search"},
+            "location": {"type": "STRING", "description": "Optional event location for calendar_update"},
+            "name": {"type": "STRING", "description": "OneDrive folder name or new item name"},
+            "item_id": {"type": "STRING", "description": "OneDrive item ID for rename/move/delete"},
+            "parent_id": {"type": "STRING", "description": "Destination OneDrive folder ID for drive_move"},
+            "notebook_id": {"type": "STRING", "description": "Optional OneNote notebook ID for listing its sections"},
+            "section_id": {"type": "STRING", "description": "OneNote section ID for listing/creating pages"},
             "time_zone": {"type": "STRING", "description": "Time zone for calendar events; defaults to Africa/Luanda"},
             "subject": {"type": "STRING", "description": "Email subject or calendar event subject"},
             "body": {"type": "STRING", "description": "Email body or event description"},
             "to": {"type": "STRING", "description": "Recipient email address for mail_send"},
             "limit": {"type": "INTEGER", "description": "Maximum number of messages to list, 1-25"},
-            "folder": {"type": "STRING", "description": "Optional OneDrive folder path relative to drive root"},
+            "folder": {"type": "STRING", "description": "Optional OneDrive parent folder path relative to drive root"},
             "file_path": {"type": "STRING", "description": "Existing local file path for drive_upload"},
             "upload_id": {"type": "STRING", "description": "Resume identifier returned by an interrupted large OneDrive upload"},
             "remote_path": {"type": "STRING", "description": "OneDrive path relative to root for upload/download"},
