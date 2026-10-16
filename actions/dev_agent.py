@@ -5,6 +5,7 @@ import json
 import re
 import time
 from pathlib import Path
+from core.path_policy import PathPolicyError, resolve_child_path, resolve_user_path
 
 
 def get_base_dir():
@@ -166,7 +167,9 @@ def _write_file(
 ) -> str:
     model = _get_model(MODEL_WRITER)
 
-    file_path = file_info["path"]
+    file_path = file_info.get("path", "")
+    if not isinstance(file_path, str) or not file_path.strip():
+        raise PathPolicyError("Generated project file path must be a non-empty relative path.")
     file_desc = file_info.get("description", "")
     file_imports = file_info.get("imports", [])
 
@@ -228,7 +231,7 @@ Code for {file_path}:"""
         response = model.generate_content(prompt)
         code = _strip_fences(response.text)
 
-        full_path = project_dir / file_path
+        full_path = resolve_child_path(project_dir, file_path, roots=[Path.home()])
         full_path.parent.mkdir(parents=True, exist_ok=True)
         full_path.write_text(code, encoding="utf-8")
 
@@ -241,39 +244,13 @@ Code for {file_path}:"""
         raise
 
 def _install_dependencies(dependencies: list[str], project_dir: Path) -> str:
+    """Fail closed until dependency installation runs in an isolated worker."""
     if not dependencies:
         return "No external dependencies."
-
-    to_install = []
-    for dep in dependencies:
-        pkg_name = re.split(r"[>=<!]", dep)[0].strip()
-        result = subprocess.run(
-            [sys.executable, "-m", "pip", "show", pkg_name],
-            capture_output=True, text=True
-        )
-        if result.returncode != 0:
-            to_install.append(dep)
-        else:
-            print(f"[DevAgent] ✓ Already installed: {pkg_name}")
-
-    if not to_install:
-        return f"All dependencies already installed: {', '.join(dependencies)}"
-
-    print(f"[DevAgent] 📦 Installing: {to_install}")
-    try:
-        result = subprocess.run(
-            [sys.executable, "-m", "pip", "install"] + to_install,
-            capture_output=True, text=True,
-            encoding="utf-8", errors="replace",
-            timeout=120, cwd=str(project_dir)
-        )
-        if result.returncode == 0:
-            return f"Installed: {', '.join(to_install)}"
-        return f"Install warning (non-fatal): {result.stderr[:200]}"
-    except subprocess.TimeoutExpired:
-        return "Dependency install timed out (non-fatal)."
-    except Exception as e:
-        return f"Install error (non-fatal): {e}"
+    return (
+        "Dependency installation skipped: generated project code and packages "
+        "are not installed without a dedicated isolated runner."
+    )
 
 def _open_vscode(project_dir: Path) -> bool:
     # Launch only a concrete executable; never pass a dynamic path through cmd.exe.
@@ -301,59 +278,15 @@ def _open_vscode(project_dir: Path) -> bool:
     return False
 
 def _run_project(run_command: str, project_dir: Path, timeout: int = 30) -> str:
-    print(f"[DevAgent] 🚀 Running: {run_command}")
-    try:
-        parts = run_command.split()
-        if parts[0].lower() == "python":
-            parts[0] = sys.executable
-
-        result = subprocess.run(
-            parts,
-            capture_output=True, text=True,
-            encoding="utf-8", errors="replace",
-            timeout=timeout,
-            cwd=str(project_dir)
-        )
-
-        stdout = result.stdout.strip()
-        stderr = result.stderr.strip()
-
-        combined_parts = []
-        if stdout:
-            combined_parts.append(f"STDOUT:\n{stdout}")
-        if stderr:
-            combined_parts.append(f"STDERR:\n{stderr}")
-
-        return "\n\n".join(combined_parts) if combined_parts else "Ran with no output."
-
-    except subprocess.TimeoutExpired:
-        return f"Timed out after {timeout}s — long-running app (server/GUI) is likely working."
-    except FileNotFoundError as e:
-        return f"Command not found: {e}"
-    except Exception as e:
-        return f"Run error: {e}"
+    """Do not execute generated project code in the main user's environment."""
+    return (
+        "Execution disabled: generated project code is not run until an "
+        "OS-enforced isolated runner is configured."
+    )
 
 def _try_auto_install(error_output: str, project_dir: Path) -> bool:
-    """If there is a ModuleNotFoundError, tries to auto-install the missing package."""
-    pattern = re.compile(
-        r"No module named ['\"]([a-zA-Z0-9_\-\.]+)['\"]", re.IGNORECASE
-    )
-    match = pattern.search(error_output)
-    if not match:
-        return False
-
-    pkg = match.group(1).replace("_", "-").split(".")[0]
-    print(f"[DevAgent] 🔧 Auto-installing missing package: {pkg}")
-    try:
-        result = subprocess.run(
-            [sys.executable, "-m", "pip", "install", pkg],
-            capture_output=True, text=True,
-            encoding="utf-8", errors="replace",
-            timeout=60, cwd=str(project_dir)
-        )
-        return result.returncode == 0
-    except Exception:
-        return False
+    """Automatic package installation is disabled pending isolated execution."""
+    return False
 
 def _fix_files(
     error_output: str,
@@ -430,7 +363,7 @@ Fixed code for {fix_path}:"""
             response = model.generate_content(prompt)
             fixed = _strip_fences(response.text)
 
-            full_path = project_dir / fix_path
+            full_path = resolve_child_path(project_dir, fix_path, roots=[Path.home()])
             full_path.parent.mkdir(parents=True, exist_ok=True)
             full_path.write_text(fixed, encoding="utf-8")
 
@@ -470,10 +403,19 @@ def _build_project(
         if speak: speak(msg)
         return msg
 
-    proj_name    = project_name or plan.get("project_name", "jarvis_project")
-    proj_name    = re.sub(r"[^\w\-]", "_", proj_name)
-    project_dir  = PROJECTS_DIR / proj_name
-    project_dir.mkdir(parents=True, exist_ok=True)
+    requested_name = project_name or plan.get("project_name", "jarvis_project")
+    if not isinstance(requested_name, str):
+        requested_name = "jarvis_project"
+    proj_name = re.sub(r"[^\w\-]", "_", requested_name).strip("._-") or "jarvis_project"
+    try:
+        projects_root = resolve_user_path(PROJECTS_DIR, roots=[Path.home()])
+        projects_root.mkdir(parents=True, exist_ok=True)
+        projects_root = resolve_user_path(projects_root, roots=[Path.home()])
+        project_dir = resolve_child_path(projects_root, proj_name, roots=[Path.home()])
+        project_dir.mkdir(parents=True, exist_ok=True)
+        project_dir = resolve_user_path(project_dir, roots=[Path.home()])
+    except (OSError, PathPolicyError) as e:
+        return f"Project directory rejected by path policy: {e}"
 
     files        = plan.get("files", [])
     entry_point  = plan.get("entry_point", "main.py")
@@ -524,13 +466,19 @@ def _build_project(
         return msg
 
     if dependencies:
-        install_result = _install_dependencies(dependencies, project_dir)
-        log(install_result)
+        log(_install_dependencies(dependencies, project_dir))
 
     _open_vscode(project_dir)
 
+    return (
+        f"Project '{proj_name}' files were generated and saved to: {project_dir}. "
+        "Automatic dependency installation and project execution are disabled "
+        "until an OS-enforced isolated runner is available. Review the files "
+        "before running them manually."
+    )
+
     last_output   = ""
-    auto_installs = 0  
+    auto_installs = 0
 
     for attempt in range(1, MAX_FIX_ATTEMPTS + 1):
         log(f"Running project (attempt {attempt}/{MAX_FIX_ATTEMPTS})...")
