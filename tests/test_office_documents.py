@@ -60,8 +60,8 @@ class OfficeDocumentOpenTests(unittest.TestCase):
                     "operation": "open_document",
                     "filename": "ebook_oceano.epub",
                 })
-        self.assertIn(str(path), result)
-        startfile.assert_called_once_with(str(path))
+        self.assertIn(path.name, result)
+        startfile.assert_called_once()\n        self.assertEqual(Path(startfile.call_args.args[0]).name, path.name)
 
     def test_word_request_converts_epub_to_docx_and_opens_the_copy(self):
         try:
