@@ -3226,6 +3226,7 @@ class MainWindow(QMainWindow):
         self._update_metrics()
 
         self._office_login_result_sig.connect(self._on_office_login_result)
+        QTimer.singleShot(0, self._refresh_office_session_state)
         self._log_sig.connect(self._log.append_log)
         self._state_sig.connect(self._apply_state)
         self._content_sig.connect(self._show_content)
@@ -3933,6 +3934,17 @@ class MainWindow(QMainWindow):
             self._proc_lbl.setText("PROC  --")
 
 
+    def _refresh_office_session_state(self) -> None:
+        """Resolve the persisted Microsoft session at startup without blocking Qt."""
+        def work():
+            try:
+                from actions.office_graph import office_graph
+                result = office_graph({"operation": "session_status"})
+            except Exception as exc:
+                result = json.dumps({"connected": None, "error": f"Session check failed: {type(exc).__name__}: {str(exc)[:250]}"})
+            self._office_login_result_sig.emit("session_status", str(result))
+        threading.Thread(target=work, daemon=True, name="microsoft-session-state").start()
+
     def _open_office_login(self) -> None:
         """Open a small, guided Microsoft device-code sign-in dialog."""
         dialog = getattr(self, "_office_login_dialog", None)
@@ -3994,6 +4006,26 @@ class MainWindow(QMainWindow):
         row.addWidget(self._office_login_check_btn)
         lay.addLayout(row)
 
+        account_actions = QHBoxLayout()
+        self._office_login_logout_btn = QPushButton("SIGN OUT")
+        self._office_login_logout_btn.setFixedHeight(30)
+        self._office_login_logout_btn.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+        self._office_login_logout_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._office_login_logout_btn.setStyleSheet(f"color: {C.RED}; border: 1px solid {C.RED}; background: transparent; padding: 4px 8px;")
+        self._office_login_logout_btn.clicked.connect(self._logout_office_account)
+        self._office_login_logout_btn.hide()
+        account_actions.addWidget(self._office_login_logout_btn)
+
+        self._office_login_reconnect_btn = QPushButton("CONNECT / RETRY")
+        self._office_login_reconnect_btn.setFixedHeight(30)
+        self._office_login_reconnect_btn.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+        self._office_login_reconnect_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._office_login_reconnect_btn.setStyleSheet(f"color: {C.PRI}; border: 1px solid {C.PRI_DIM}; background: transparent; padding: 4px 8px;")
+        self._office_login_reconnect_btn.clicked.connect(self._reconnect_office_account)
+        self._office_login_reconnect_btn.hide()
+        account_actions.addWidget(self._office_login_reconnect_btn)
+        lay.addLayout(account_actions)
+
         close_btn = QPushButton("CLOSE")
         close_btn.setFixedHeight(28)
         close_btn.setFont(QFont("Courier New", 8))
@@ -4004,13 +4036,23 @@ class MainWindow(QMainWindow):
         self._office_login_dialog = dialog
         self._office_login_url = ""
         dialog.show()
-        self._run_office_login_operation("start_login")
+        # Resolve the OS credential vault first: do not launch another OAuth
+        # device flow if this account is already connected.
+        self._run_office_login_operation("session_status")
 
     def _run_office_login_operation(self, operation: str) -> None:
         """Run network sign-in work away from Qt's UI thread."""
         if hasattr(self, "_office_login_status"):
-            self._office_login_status.setText("Starting secure sign-in…" if operation == "start_login" else "Checking Microsoft sign-in…")
+            labels = {
+                "start_login": "Starting secure sign-in…",
+                "poll_login": "Checking Microsoft sign-in…",
+                "session_status": "Checking saved Microsoft session…",
+                "logout": "Signing out and removing saved credentials…",
+            }
+            self._office_login_status.setText(labels.get(operation, "Checking Microsoft account…"))
         self._office_login_check_btn.setEnabled(False)
+        if operation in {"start_login", "logout"}:
+            self._office_login_reconnect_btn.hide()
 
         def work():
             try:
@@ -4029,27 +4071,140 @@ class MainWindow(QMainWindow):
     def _poll_office_login(self) -> None:
         self._run_office_login_operation("poll_login")
 
+    def _set_office_account_state(self, connected: bool, display_name: str = "", email: str = "") -> None:
+        """Keep the settings button and dialog aligned with the persisted OAuth session."""
+        self._office_connected = bool(connected)
+        if connected:
+            name = (display_name or "Microsoft account").strip()
+            self._office_btn.setText("✓  MS 365 · " + name[:18])
+            self._office_btn.setToolTip(
+                "Connected to " + name + (("\n" + email) if email else "")
+                + "\nOpen to view account details or sign out."
+            )
+            self._office_btn.setStyleSheet(
+                f"color: {C.GREEN}; border: 1px solid {C.GREEN_D}; background: {C.PANEL2}; padding: 4px;"
+            )
+        else:
+            self._office_btn.setText("▣  MICROSOFT 365 SIGN IN")
+            self._office_btn.setToolTip("Connect Outlook, Calendar, OneDrive and supported Microsoft services")
+            self._office_btn.setStyleSheet(self._BTN_PRI if hasattr(self, "_BTN_PRI") else "")
+        if hasattr(self, "_office_login_logout_btn"):
+            self._office_login_logout_btn.setVisible(bool(connected))
+        if hasattr(self, "_office_login_reconnect_btn") and connected:
+            self._office_login_reconnect_btn.hide()
+
+    def _logout_office_account(self) -> None:
+        self._run_office_login_operation("logout")
+
+    def _reconnect_office_account(self) -> None:
+        self._office_login_reconnect_btn.hide()
+        self._run_office_login_operation("start_login")
+
+    def _retry_office_session_status(self) -> None:
+        self._run_office_login_operation("session_status")
+
+    def _retry_office_logout(self) -> None:
+        self._run_office_login_operation("logout")
+
+    def _set_office_reconnect_action(self, label: str, handler) -> None:
+        try:
+            self._office_login_reconnect_btn.clicked.disconnect()
+        except TypeError:
+            pass
+        self._office_login_reconnect_btn.setText(label)
+        self._office_login_reconnect_btn.clicked.connect(handler)
+
     def _on_office_login_result(self, operation: str, result: str) -> None:
-        """Render sign-in results on the Qt thread; never block the HUD on HTTP."""
-        if not hasattr(self, "_office_login_status"):
+        """Render Microsoft auth state on Qt's UI thread; never block the HUD on HTTP."""
+        if not hasattr(self, "_office_login_status") and operation != "session_status":
             return
+
+        if operation == "session_status":
+            try:
+                state = json.loads(result)
+            except (ValueError, TypeError):
+                state = {"connected": None, "error": "Microsoft returned an unreadable session status."}
+
+            if state.get("connected") is True:
+                name = str(state.get("display_name") or "Microsoft account")
+                email = str(state.get("email") or "")
+                self._set_office_account_state(True, name, email)
+                if not hasattr(self, "_office_login_status"):
+                    return
+                self._office_login_status.setText("Microsoft account connected.")
+                self._office_login_code.setText(name + (("\n" + email) if email else ""))
+                self._office_login_code.setStyleSheet(f"color: {C.GREEN}; background: transparent;")
+                self._office_login_open_btn.setEnabled(False)
+                self._office_login_open_btn.hide()
+                self._office_login_check_btn.setEnabled(False)
+                self._office_login_check_btn.hide()
+                self._office_login_reconnect_btn.hide()
+            elif state.get("connected") is False:
+                self._set_office_account_state(False)
+                if not hasattr(self, "_office_login_status"):
+                    return
+                message = str(state.get("message") or "No Microsoft account is connected.")
+                self._office_login_code.setText("Not connected")
+                self._office_login_code.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
+                self._office_login_open_btn.show()
+                self._office_login_check_btn.show()
+                if "No Microsoft account is connected" in message or "Sign in again" in message:
+                    self._run_office_login_operation("start_login")
+                else:
+                    self._office_login_status.setText(message)
+                    self._set_office_reconnect_action("CONNECT AGAIN", self._reconnect_office_account)
+                    self._office_login_reconnect_btn.show()
+            else:
+                self._office_login_status.setText(str(state.get("error") or "Could not verify the saved Microsoft session."))
+                self._set_office_reconnect_action("RETRY STATUS", self._retry_office_session_status)
+                self._office_login_reconnect_btn.show()
+            return
+
+        if operation == "logout":
+            if "logout failed" in result.casefold():
+                self._office_login_status.setText(result)
+                self._set_office_reconnect_action("RETRY SIGN OUT", self._retry_office_logout)
+                self._office_login_reconnect_btn.show()
+                return
+            self._set_office_account_state(False)
+            self._office_login_status.setText("Signed out. Saved Microsoft credentials were removed from this device.")
+            self._office_login_code.setText("Not connected")
+            self._office_login_code.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
+            self._office_login_open_btn.hide()
+            self._office_login_check_btn.hide()
+            self._office_login_logout_btn.hide()
+            self._set_office_reconnect_action("CONNECT MICROSOFT ACCOUNT", self._reconnect_office_account)
+            self._office_login_reconnect_btn.show()
+            return
+
         self._office_login_status.setText(result)
         match = re.search(r"Open\s+(https?://\S+)\s+and enter code\s+([A-Z0-9-]+)", result, re.IGNORECASE)
         if match:
             self._office_login_url = match.group(1).rstrip(".,")
             self._office_login_code.setText("Verification code:  " + match.group(2).rstrip("."))
+            self._office_login_open_btn.show()
             self._office_login_open_btn.setEnabled(True)
+            self._office_login_check_btn.show()
             self._office_login_check_btn.setEnabled(True)
+            self._office_login_reconnect_btn.hide()
         elif operation == "poll_login":
             pending = "still pending" in result.casefold() or "authorization_pending" in result.casefold()
             connected = "account connected" in result.casefold() or "tokens were stored" in result.casefold()
-            self._office_login_check_btn.setEnabled(pending)
             if connected:
-                self._office_login_code.setText("Microsoft account connected")
-                self._office_login_code.setStyleSheet(f"color: {C.GREEN}; background: transparent;")
-                self._office_login_open_btn.setEnabled(False)
-            elif not pending:
-                self._office_login_check_btn.setEnabled(True)
+                self._office_login_status.setText("Authorization complete. Loading Microsoft account…")
+                self._office_login_open_btn.hide()
+                self._office_login_check_btn.hide()
+                self._run_office_login_operation("session_status")
+            else:
+                self._office_login_check_btn.setEnabled(pending or "no device sign-in is pending" not in result.casefold())
+                if not pending:
+                    self._set_office_reconnect_action("START SIGN IN AGAIN", self._reconnect_office_account)
+                    self._office_login_reconnect_btn.show()
+        elif operation == "start_login" and "already connected to" in result.casefold():
+            self._run_office_login_operation("session_status")
+        elif operation == "start_login" and ("could not start" in result.casefold() or "not configured" in result.casefold()):
+            self._set_office_reconnect_action("RETRY SIGN IN", self._reconnect_office_account)
+            self._office_login_reconnect_btn.show()
 
     def _build_header(self) -> QWidget:
         w = QWidget()
@@ -4360,6 +4515,8 @@ class MainWindow(QMainWindow):
         lay.addWidget(audio_btn)
 
         office_btn = QPushButton("▣  MICROSOFT 365 SIGN IN")
+        self._office_btn = office_btn
+        self._office_connected = False
         office_btn.setFixedHeight(30)
         office_btn.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
         office_btn.setCursor(Qt.CursorShape.PointingHandCursor)
