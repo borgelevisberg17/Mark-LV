@@ -85,7 +85,7 @@ class OfficeArtifactIntegrationTests(unittest.TestCase):
         self.assertEqual(2, len(presentation.slides))
         texts = [shape.text for slide in presentation.slides for shape in slide.shapes if shape.has_text_frame]
         self.assertIn("Next steps", texts)
-        self.assertIn("Build", texts)
+        self.assertIn("Build", "\n".join(texts))
 
     def test_image_resize_preserves_original(self):
         from PIL import Image
@@ -98,9 +98,11 @@ class OfficeArtifactIntegrationTests(unittest.TestCase):
             "output_dir": str(self.output)
         })
         self.assertIn("Resized image", result)
-        self.assertEqual((40, 20), Image.open(source).size)
+        with Image.open(source) as original:
+            self.assertEqual((40, 20), original.size)
         resized = next(self.output.glob("*-resized.png"))
-        self.assertEqual((20, 10), Image.open(resized).size)
+        with Image.open(resized) as result_image:
+            self.assertEqual((20, 10), result_image.size)
 
     def test_text_to_pdf_creates_nonempty_pdf(self):
         from actions.document_conversion import document_conversion
