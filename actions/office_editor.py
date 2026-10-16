@@ -139,28 +139,31 @@ def _docx_edit(params: dict) -> str:
         heading = str(params.get("heading", "Índice")).strip() or "Índice"
         doc.add_heading(heading, level=1)
         paragraph = doc.add_paragraph()
+        begin_run = OxmlElement("w:r")
         begin = OxmlElement("w:fldChar")
         begin.set(qn("w:fldCharType"), "begin")
+        begin_run.append(begin)
+        instruction_run = OxmlElement("w:r")
         instruction = OxmlElement("w:instrText")
         instruction.set(qn("xml:space"), "preserve")
         instruction.text = ' TOC \\o "1-3" \\h \\z \\u '
+        instruction_run.append(instruction)
+        separate_run = OxmlElement("w:r")
         separate = OxmlElement("w:fldChar")
         separate.set(qn("w:fldCharType"), "separate")
-        placeholder = OxmlElement("w:t")
-        placeholder.text = "Abra no Word e atualize o campo para gerar o índice."
-        run = OxmlElement("w:r")
-        run.append(separate)
-        text = OxmlElement("w:t")
-        text.text = "Abra no Word e atualize o campo para gerar o índice."
-        run.append(text)
+        separate_run.append(separate)
+        placeholder_run = OxmlElement("w:r")
+        placeholder_text = OxmlElement("w:t")
+        placeholder_text.text = "Abra no Word e atualize o campo para gerar o índice."
+        placeholder_run.append(placeholder_text)
         end_run = OxmlElement("w:r")
         end = OxmlElement("w:fldChar")
         end.set(qn("w:fldCharType"), "end")
         end_run.append(end)
-        paragraph._p.append(begin)
-        paragraph._p.append(OxmlElement("w:r"))
-        paragraph._p[-1].append(instruction)
-        paragraph._p.append(run)
+        paragraph._p.append(begin_run)
+        paragraph._p.append(instruction_run)
+        paragraph._p.append(separate_run)
+        paragraph._p.append(placeholder_run)
         paragraph._p.append(end_run)
         summary = "Inserted a Word TOC field. Word must update the field to calculate page numbers."
 
@@ -288,9 +291,13 @@ def _pptx_edit(params: dict) -> str:
         shape = shapes[shape_index]
         if not shape.has_text_frame:
             raise ValueError("The selected shape does not contain editable text.")
-        shape.text_frame.paragraphs[0].runs[0].text = text if shape.text_frame.paragraphs[0].runs else text
-        if not shape.text_frame.paragraphs[0].runs:
-            shape.text_frame.paragraphs[0].add_run().text = text
+        paragraph = shape.text_frame.paragraphs[0]
+        if paragraph.runs:
+            paragraph.runs[0].text = text
+            for run in paragraph.runs[1:]:
+                run.text = ""
+        else:
+            paragraph.add_run().text = text
         summary = f"Updated text in slide {slide_index + 1}, shape {shape_index + 1}."
     elif operation == "append_slides":
         slides = params.get("slides")
@@ -342,7 +349,7 @@ def _create_epub(params: dict) -> str:
     cover_path = None
     raw_cover = str(params.get("cover_image_path", "") or "").strip()
     if raw_cover:
-        cover_path = _source_path(raw_cover, {".png", ".jpg", ".jpeg", ".webp"})
+        cover_path = _source_path(raw_cover, {".png", ".jpg", ".jpeg"})
         if cover_path.stat().st_size > 20 * 1024 * 1024:
             raise ValueError("EPUB cover exceeds the 20 MiB limit.")
     identifier = "urn:uuid:" + str(uuid.uuid4())
