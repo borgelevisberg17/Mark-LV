@@ -7,6 +7,7 @@ No client secret is used or accepted.
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import os
 import re
@@ -651,6 +652,14 @@ def office_graph(parameters: dict, player=None, speak=None) -> str:
         except Exception as exc:
             return f"Microsoft logout failed: {type(exc).__name__}: {str(exc)[:400]}"
 
+    if operation == "forms_open":
+        import webbrowser
+        try:
+            webbrowser.open("https://forms.office.com/")
+            return "Opened Microsoft Forms in the default browser. Use the Forms web interface to create or edit forms; generic form authoring is not available through Microsoft Graph v1.0."
+        except Exception as exc:
+            return "Could not open Microsoft Forms: " + str(exc)[:300]
+
     required = _REQUIRED.get(operation)
     if required is None:
         if operation in {"forms_create", "forms_edit"}:
@@ -873,11 +882,6 @@ def office_graph(parameters: dict, player=None, speak=None) -> str:
                 lambda: "Created OneNote page: " + json.dumps(_graph("POST", "/me/onenote/sections/" + quote(section_id, safe="") + "/pages", token, data=page_html, headers={"Content-Type": "text/html; charset=utf-8"}), ensure_ascii=False)[:1000],
                 category="network", permissions=("network",),
             )
-
-        if operation == "forms_open":
-            import webbrowser
-            opened = webbrowser.open("https://forms.office.com/")
-            return "Opened Microsoft Forms in the default browser. Form creation/editing must be completed through the supported Forms web interface; generic Forms authoring is not available in Microsoft Graph v1.0."
 
         if operation == "profile":
             data = _graph("GET", "/me", token)
