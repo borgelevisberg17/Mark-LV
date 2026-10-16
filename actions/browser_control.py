@@ -998,6 +998,35 @@ class _SessionRegistry:
 
 _registry = _SessionRegistry()
 
+# The localhost bridge is started with the action module so the Edge extension
+# can connect before the first browser command. It never launches a browser.
+try:
+    from core.browser_bridge import BrowserBridge
+    _browser_bridge = BrowserBridge()
+    _browser_bridge.start()
+except Exception as _bridge_error:
+    print(f"[BrowserBridge] Disabled: {_bridge_error}")
+    _browser_bridge = None
+
+_BRIDGE_ACTIONS = {
+    "go_to", "search", "new_tab", "click", "type", "scroll", "fill_form",
+    "smart_click", "smart_type", "get_text", "get_url", "press", "close_tab",
+    "back", "forward", "reload",
+}
+_EDGE_NAMES = {"edge", "msedge", "microsoft edge", "ms edge"}
+
+def _try_existing_edge(action: str, browser: str | None, params: dict) -> str | None:
+    """Use the extension to operate the real Edge session when connected."""
+    if action not in _BRIDGE_ACTIONS or _browser_bridge is None:
+        return None
+    requested = (browser or "").strip().lower()
+    use_edge = requested in _EDGE_NAMES or (not requested and _detect_default_browser() == "edge")
+    if not use_edge:
+        return None
+    if not _browser_bridge.start() or not _browser_bridge.connected():
+        return None
+    return _browser_bridge.submit(action, params)
+
 def browser_control(
     parameters:    dict = None,
     response=None,
@@ -1008,6 +1037,16 @@ def browser_control(
     action  = params.get("action", "").lower().strip()
     browser = params.get("browser", "").lower().strip() or None
     result  = "Unknown action."
+
+    # Prefer the extension bridge for the user's existing Edge window. If it
+    # is not connected, preserve the normal fallback/safety behaviour below.
+    try:
+        bridged = _try_existing_edge(action, browser, params)
+        if bridged is not None:
+            _log(player, bridged)
+            return bridged
+    except Exception as e:
+        print(f"[BrowserBridge] Command failed; using normal browser handling: {e}")
 
     if action == "switch":
         target = browser or params.get("target", "").lower().strip()
