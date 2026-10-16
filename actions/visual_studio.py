@@ -167,7 +167,7 @@ def _compose_cover_text(image_path: Path, params: dict) -> Path:
     return output
 
 
-def _preflight_target(raw_target: str, slide_index=None) -> Path | None:
+def _preflight_target(raw_target: str, slide_index=None, pptx_placement=None, shape_index=None) -> Path | None:
     """Validate an Office target before consuming image-generation quota."""
     if not raw_target.strip():
         return None
@@ -181,6 +181,16 @@ def _preflight_target(raw_target: str, slide_index=None) -> Path | None:
         presentation = Presentation(target)
         if isinstance(slide_index, bool) or not isinstance(slide_index, int) or not 0 <= slide_index < len(presentation.slides):
             raise ValueError(f"slide_index must be between 0 and {len(presentation.slides) - 1}.")
+        if str(pptx_placement or "").lower() == "replace_picture":
+            if isinstance(shape_index, bool) or not isinstance(shape_index, int):
+                raise ValueError("shape_index is required for pptx_placement=replace_picture.")
+            shapes = presentation.slides[slide_index].shapes
+            if not 0 <= shape_index < len(shapes):
+                raise ValueError(f"shape_index must be between 0 and {len(shapes) - 1}.")
+            if shapes[shape_index].shape_type != 13:
+                raise ValueError("replace_picture requires shape_index to identify an existing picture.")
+    elif str(pptx_placement or "").lower() == "replace_picture":
+        raise ValueError("replace_picture requires slide_index and shape_index.")
     return target
 
 
@@ -254,7 +264,7 @@ def _generate(params: dict) -> tuple[Path, str]:
     return _compose_cover_text(output, params), mime
 
 
-def _insert_docx(image_path: Path, raw_target: str, insertion_mode: str = "cover", caption: str = "") -> Path:
+def _insert_docx(image_path: Path, raw_target: str, insertion_mode: str = "cover", caption: str = "", insert_after_text: str = "", alt_text: str = "") -> Path:
     from docx import Document
     from docx.enum.text import WD_BREAK
     from docx.shared import Inches
@@ -274,11 +284,21 @@ def _insert_docx(image_path: Path, raw_target: str, insertion_mode: str = "cover
     scale = min(max_width / image_width, max_height / image_height)
     paragraph = document.add_paragraph()
     paragraph.alignment = 1
-    paragraph.add_run().add_picture(str(image_path), width=int(image_width * scale), height=int(image_height * scale))
+    inline_shape = paragraph.add_run().add_picture(str(image_path), width=int(image_width * scale), height=int(image_height * scale))
+    if alt_text.strip():
+        inline_shape._inline.docPr.set("descr", alt_text.strip()[:1000])
+        inline_shape._inline.docPr.set("title", alt_text.strip()[:255])
     caption_paragraph = None
     if caption.strip():
         caption_paragraph = document.add_paragraph(caption.strip(), style="Caption")
         caption_paragraph.alignment = 1
+    if insertion_mode == "inline" and insert_after_text.strip():
+        anchor = next((p for p in _iter_docx_paragraphs(document) if insert_after_text.strip() in p.text), None)
+        if anchor is None:
+            raise ValueError(f"insert_after_text was not found in the document: {insert_after_text[:120]}")
+        anchor._p.addnext(paragraph._p)
+        if caption_paragraph is not None:
+            paragraph._p.addnext(caption_paragraph._p)
     body = document._element.body
     if insertion_mode == "cover":
         page_break = document.add_paragraph()
@@ -299,7 +319,7 @@ def _insert_docx(image_path: Path, raw_target: str, insertion_mode: str = "cover
     return output
 
 
-def _insert_pptx(image_path: Path, raw_target: str, slide_index=None, caption: str = "") -> Path:
+def _insert_pptx(image_path: Path, raw_target: str, slide_index=None, caption: str = "", placement: str = "append_slide", shape_index=None, alt_text: str = "") -> Path:
     from pptx import Presentation
     from pptx.util import Inches
     target = resolve_user_path(raw_target, roots=user_accessible_roots(), must_exist=True)
@@ -309,29 +329,49 @@ def _insert_pptx(image_path: Path, raw_target: str, slide_index=None, caption: s
         raise ValueError("Target presentation exceeds the 100 MiB limit.")
     output = unique_output_path(target.parent, safe_filename(target.stem + "-visual", target.stem + "-visual", ".pptx"))
     presentation = Presentation(target)
+    placement = str(placement or ("contain" if slide_index is not None else "append_slide")).strip().lower()
+    if placement not in {"append_slide", "contain", "replace_picture"}:
+        raise ValueError("pptx_placement must be append_slide, contain, or replace_picture.")
+    if placement == "replace_picture" and (slide_index is None or shape_index is None):
+        raise ValueError("replace_picture requires slide_index and shape_index.")
     from PIL import Image
     with Image.open(image_path) as image:
         image_width, image_height = image.size
-    if slide_index is None:
-        # Append a dedicated visual slide; fit without distorting the source image.
+    replaced_shape = None
+    if placement == "append_slide":
         layout = next((item for item in presentation.slide_layouts if len(item.placeholders) == 0), presentation.slide_layouts[-1])
         slide = presentation.slides.add_slide(layout)
         bound_left = bound_top = Inches(0)
         bound_width, bound_height = presentation.slide_width, presentation.slide_height
     else:
-        index = int(slide_index)
-        if index < 0 or index >= len(presentation.slides):
+        if isinstance(slide_index, bool) or not isinstance(slide_index, int) or not 0 <= slide_index < len(presentation.slides):
             raise ValueError(f"slide_index must be between 0 and {len(presentation.slides) - 1}.")
-        slide = presentation.slides[index]
-        bound_left = bound_top = Inches(1)
-        bound_width = presentation.slide_width - Inches(2)
-        bound_height = presentation.slide_height - Inches(2)
+        slide = presentation.slides[slide_index]
+        if placement == "replace_picture":
+            if isinstance(shape_index, bool) or not isinstance(shape_index, int) or not 0 <= shape_index < len(slide.shapes):
+                raise ValueError(f"shape_index must be between 0 and {len(slide.shapes) - 1}.")
+            replaced_shape = slide.shapes[shape_index]
+            if replaced_shape.shape_type != 13:
+                raise ValueError("replace_picture requires shape_index to identify an existing picture.")
+            bound_left, bound_top = replaced_shape.left, replaced_shape.top
+            bound_width, bound_height = replaced_shape.width, replaced_shape.height
+        else:
+            bound_left = bound_top = Inches(1)
+            bound_width = presentation.slide_width - Inches(2)
+            bound_height = presentation.slide_height - Inches(2)
     scale = min(bound_width / image_width, bound_height / image_height)
     width, height = int(image_width * scale), int(image_height * scale)
     left = bound_left + int((bound_width - width) / 2)
     top = bound_top + int((bound_height - height) / 2)
     picture = slide.shapes.add_picture(str(image_path), left, top, width=width, height=height)
     picture.name = "Mark-LV generated visual"
+    if alt_text.strip():
+        picture._element._nvXxPr.cNvPr.set("descr", alt_text.strip()[:1000])
+        picture._element._nvXxPr.cNvPr.set("title", alt_text.strip()[:255])
+    if replaced_shape is not None:
+        shape_tree = slide.shapes._spTree
+        shape_tree.insert(shape_tree.index(replaced_shape._element), picture._element)
+        shape_tree.remove(replaced_shape._element)
     if caption.strip():
         from pptx.enum.text import PP_ALIGN
         from pptx.util import Pt
@@ -389,7 +429,7 @@ def visual_studio(parameters: dict, player=None, speak=None, dashboard=None, eve
         if operation in {"generate", "edit"}:
             target = str(params.get("target_file_path", "") or "").strip()
             if target:
-                _preflight_target(target, params.get("slide_index"))
+                _preflight_target(target, params.get("slide_index"), params.get("pptx_placement"), params.get("shape_index"))
             image_path, mime = _generate(params)
             details = f"Visual saved: {image_path}\nFormat: {mime}"
             inserted = None
@@ -399,9 +439,10 @@ def visual_studio(parameters: dict, player=None, speak=None, dashboard=None, eve
                 caption = str(params.get("caption", "") or "")
                 if target_path.suffix.lower() == ".docx":
                     mode = str(params.get("docx_insertion_mode", "cover") or "cover").lower()
-                    inserted = _insert_docx(image_path, target, mode, caption)
+                    inserted = _insert_docx(image_path, target, mode, caption, str(params.get("insert_after_text", "") or ""), str(params.get("alt_text", "") or ""))
                 else:
-                    inserted = _insert_pptx(image_path, target, params.get("slide_index"), caption)
+                    placement = str(params.get("pptx_placement", "") or ("contain" if params.get("slide_index") is not None else "append_slide"))
+                    inserted = _insert_pptx(image_path, target, params.get("slide_index"), caption, placement, params.get("shape_index"), str(params.get("alt_text", "") or ""))
                 details += f"\nInserted into a new copy: {inserted}"
             if _publish_preview(image_path, params, dashboard, event_loop, inserted):
                 details += "\nPreview opened in the Mark-LV dashboard. Close it with the × button when finished."
@@ -417,9 +458,10 @@ def visual_studio(parameters: dict, player=None, speak=None, dashboard=None, eve
             caption = str(params.get("caption", "") or "")
             if target_path.suffix.lower() == ".docx":
                 mode = str(params.get("docx_insertion_mode", "cover") or "cover").lower()
-                inserted = _insert_docx(image_path, target, mode, caption)
+                inserted = _insert_docx(image_path, target, mode, caption, str(params.get("insert_after_text", "") or ""), str(params.get("alt_text", "") or ""))
             else:
-                inserted = _insert_pptx(image_path, target, params.get("slide_index"), caption)
+                placement = str(params.get("pptx_placement", "") or ("contain" if params.get("slide_index") is not None else "append_slide"))
+                inserted = _insert_pptx(image_path, target, params.get("slide_index"), caption, placement, params.get("shape_index"), str(params.get("alt_text", "") or ""))
             previewed = _publish_preview(image_path, params, dashboard, event_loop, inserted)
             result = f"Image inserted into a new copy: {inserted}\nSource image and original document/presentation were preserved."
             if previewed:
@@ -443,7 +485,7 @@ TOOL = {
         "Supports covers, illustrations, posters, backgrounds and visual assets. Optional aspect_ratio and image_size tune generation. "
         "cover_title, cover_subtitle and cover_author add readable typography to a designed copy while preserving the raw generated image. "
         "Uses the app's config/api_keys.json Gemini key; never ask the user to paste the key. Existing files are preserved. "
-        "DOCX supports docx_insertion_mode=cover|inline; PPTX appends a fitted visual slide by default or inserts into a zero-based slide_index. Optional caption is supported. "
+        "DOCX supports cover or inline insertion after a matching text anchor, optional captions and accessibility alt text. PPTX supports appending a fitted slide, inserting on an existing slide, or replacing an existing picture by zero-based shape_index while preserving its bounds and stacking order. "
         "The target is validated before generation to avoid wasting quota on invalid Office paths. Use exact local paths and report output paths only after success."
     ),
     "parameters": {
@@ -453,7 +495,9 @@ TOOL = {
             "prompt": {"type": "STRING", "description": "Detailed visual brief; required for generate/edit"},
             "image_path": {"type": "STRING", "description": "Existing PNG/JPEG/WEBP source for edit or insert"},
             "target_file_path": {"type": "STRING", "description": "Optional existing DOCX/PPTX to receive the generated image automatically"},
-            "slide_index": {"type": "INTEGER", "description": "Optional zero-based existing PowerPoint slide index; omit to append a full-bleed visual slide"},
+            "slide_index": {"type": "INTEGER", "description": "Zero-based PowerPoint slide index for contain/replace_picture; omit to append a new visual slide"},
+            "pptx_placement": {"type": "STRING", "description": "append_slide | contain | replace_picture; replace_picture requires slide_index and shape_index"},
+            "shape_index": {"type": "INTEGER", "description": "Zero-based shape index on slide_index; required to replace an existing picture"},
             "output_dir": {"type": "STRING", "description": "Optional output directory inside permitted user roots"},
             "filename": {"type": "STRING", "description": "Optional output filename, without directories"},
             "model": {"type": "STRING", "description": "Optional Gemini image model identifier; defaults to gemini-2.5-flash-image"},
@@ -463,6 +507,8 @@ TOOL = {
             "cover_subtitle": {"type": "STRING", "description": "Optional exact subtitle overlaid on a designed copy"},
             "cover_author": {"type": "STRING", "description": "Optional exact author or brand overlaid on a designed copy"},
             "docx_insertion_mode": {"type": "STRING", "description": "cover | inline; defaults to cover"},
+            "insert_after_text": {"type": "STRING", "description": "Optional text fragment identifying the Word paragraph after which to insert an inline illustration"},
+            "alt_text": {"type": "STRING", "description": "Optional accessible alternative text for the inserted image"},
             "caption": {"type": "STRING", "description": "Optional caption for Word or PowerPoint"}
         },
         "required": ["operation"]
