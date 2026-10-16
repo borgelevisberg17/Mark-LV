@@ -11,6 +11,7 @@ except ImportError:
     _SEND2TRASH = False
 
 from core.undo import push_undo
+from core.path_policy import PathPolicyError, is_within_roots, resolve_child_path, resolve_user_path
 
 _OS = platform.system()  # "Windows" | "Darwin" | "Linux"
 
@@ -95,15 +96,14 @@ _SAFE_ROOTS: list[Path] = [
 ]
 
 def _is_safe_path(target: Path) -> bool:
-    """Is the given path inside _SAFE_ROOTS? If not, reject the operation."""
-    try:
-        resolved = target.resolve()
-        return any(
-            resolved == root.resolve() or resolved.is_relative_to(root.resolve())
-            for root in _SAFE_ROOTS
-        )
-    except Exception:
-        return False
+    """Check canonical path containment under the allowed home directory."""
+    return is_within_roots(target, _SAFE_ROOTS)
+
+
+def _resolve_child_path(base: Path, child: str) -> Path:
+    """Resolve a relative name under a base directory, rejecting traversal."""
+    return resolve_child_path(base, child, roots=_SAFE_ROOTS)
+
 
 def _get_desktop() -> Path:
     if _OS == "Linux":
@@ -158,23 +158,25 @@ def _resolve_path(raw: str) -> Path:
         "videos":    _get_videos(),
         "home":      Path.home(),
     }
-    raw   = raw.strip().strip('"').strip("'")
-    lower = raw.lower()
+    raw = raw.strip().strip('"').strip("'")
+    if not raw or "\x00" in raw:
+        raise PathPolicyError("Path is empty or invalid.")
+    normalized = raw.replace("\\", "/")
+    if ".." in Path(normalized).parts:
+        raise PathPolicyError("Path traversal ('..') is not allowed.")
+
+    lower = normalized.lower()
     if lower in shortcuts:
-        return shortcuts[lower]
+        candidate = shortcuts[lower]
+    else:
+        head, sep, rest = normalized.partition("/")
+        if sep and head.lower() in shortcuts:
+            rest = rest.strip("/")
+            candidate = shortcuts[head.lower()] / rest if rest else shortcuts[head.lower()]
+        else:
+            candidate = Path(raw).expanduser()
 
-    # "desktop/notes/a.md" and "desktop\notes\a.md" — a shortcut followed by a
-    # sub-path.  Without this branch the whole string falls through to the
-    # relative-path return below and is resolved against the process CWD instead
-    # of the real Desktop: an "Access denied" when the project lives outside the
-    # home directory, or — worse — a silent write into a stray "desktop" folder
-    # inside the project when it lives inside it.
-    head, sep, rest = raw.replace("\\", "/").partition("/")
-    if sep and head.lower() in shortcuts:
-        rest = rest.strip("/")
-        return shortcuts[head.lower()] / rest if rest else shortcuts[head.lower()]
-
-    return Path(raw).expanduser()
+    return resolve_user_path(candidate, roots=_SAFE_ROOTS)
 
 def _format_size(b: int) -> str:
     for unit in ["B", "KB", "MB", "GB", "TB"]:
@@ -229,7 +231,7 @@ def list_files(path: str = "desktop", show_hidden: bool = False) -> str:
 def create_file(path: str, name: str = "", content: str = "") -> str:
     try:
         base   = _resolve_path(path)
-        target = (base / name) if name else base
+        target = _resolve_child_path(base, name) if name else base
         if not _is_safe_path(target):
             return f"Access denied: {target}"
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -251,7 +253,7 @@ def create_file(path: str, name: str = "", content: str = "") -> str:
 def create_folder(path: str, name: str = "") -> str:
     try:
         base   = _resolve_path(path)
-        target = (base / name) if name else base
+        target = _resolve_child_path(base, name) if name else base
         if not _is_safe_path(target):
             return f"Access denied: {target}"
         already = target.exists()
@@ -269,7 +271,7 @@ def create_folder(path: str, name: str = "") -> str:
 def delete_file(path: str, name: str = "") -> str:
     try:
         base   = _resolve_path(path)
-        target = (base / name) if name else base
+        target = _resolve_child_path(base, name) if name else base
         if not _is_safe_path(target):
             return f"Access denied: {target}"
         if not target.exists():
@@ -299,7 +301,7 @@ def delete_file(path: str, name: str = "") -> str:
 def move_file(path: str, name: str = "", destination: str = "") -> str:
     try:
         base   = _resolve_path(path)
-        src    = (base / name) if name else base
+        src    = _resolve_child_path(base, name) if name else base
         dst    = _resolve_path(destination) if destination else None
 
         if not src.exists():
@@ -312,7 +314,7 @@ def move_file(path: str, name: str = "", destination: str = "") -> str:
             return f"Access denied (destination): {dst}"
 
         if dst.is_dir():
-            dst = dst / src.name
+            dst = _resolve_child_path(dst, src.name)
 
         dst.parent.mkdir(parents=True, exist_ok=True)
         origin = src.resolve()
@@ -328,7 +330,7 @@ def move_file(path: str, name: str = "", destination: str = "") -> str:
 def copy_file(path: str, name: str = "", destination: str = "") -> str:
     try:
         base = _resolve_path(path)
-        src  = (base / name) if name else base
+        src  = _resolve_child_path(base, name) if name else base
         dst  = _resolve_path(destination) if destination else None
 
         if not src.exists():
@@ -371,7 +373,7 @@ def copy_file(path: str, name: str = "", destination: str = "") -> str:
 def rename_file(path: str, name: str = "", new_name: str = "") -> str:
     try:
         base     = _resolve_path(path)
-        target   = (base / name) if name else base
+        target   = _resolve_child_path(base, name) if name else base
         if not _is_safe_path(target):
             return f"Access denied: {target}"
         if not target.exists():
@@ -379,7 +381,10 @@ def rename_file(path: str, name: str = "", new_name: str = "") -> str:
         if not new_name:
             return "No new name provided."
 
-        new_path = target.parent / new_name
+        if (not isinstance(new_name, str) or not new_name.strip() or
+                new_name in (".", "..") or "/" in new_name or "\\" in new_name or "\x00" in new_name):
+            return "Invalid new name: use a single file or folder name."
+        new_path = _resolve_child_path(target.parent, new_name)
         if new_path.exists():
             return f"A file named '{new_name}' already exists here."
 
@@ -396,7 +401,7 @@ def rename_file(path: str, name: str = "", new_name: str = "") -> str:
 def read_file(path: str, name: str = "", max_chars: int = 4000) -> str:
     try:
         base   = _resolve_path(path)
-        target = (base / name) if name else base
+        target = _resolve_child_path(base, name) if name else base
         if not _is_safe_path(target):
             return f"Access denied: {target}"
         if not target.exists():
@@ -417,7 +422,7 @@ def write_file(path: str, name: str = "", content: str = "",
                append: bool = False) -> str:
     try:
         base   = _resolve_path(path)
-        target = (base / name) if name else base
+        target = _resolve_child_path(base, name) if name else base
         if not _is_safe_path(target):
             return f"Access denied: {target}"
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -624,7 +629,7 @@ def organize_desktop() -> str:
 def get_file_info(path: str, name: str = "") -> str:
     try:
         base   = _resolve_path(path)
-        target = (base / name) if name else base
+        target = _resolve_child_path(base, name) if name else base
         if not _is_safe_path(target):
             return f"Access denied: {target}"
         if not target.exists():
