@@ -1,6 +1,8 @@
 """Create and inspect editable Excel workbooks without overwriting existing files."""
 from __future__ import annotations
 
+from copy import copy
+
 from core.path_policy import PathPolicyError, resolve_user_path, user_accessible_roots
 from actions._office_common import safe_filename, safe_output_directory, unique_output_path
 
@@ -37,7 +39,9 @@ def office_spreadsheets(parameters: dict, player=None, speak=None) -> str:
             if headers:
                 sheet.append(headers)
                 for cell in sheet[1]:
-                    cell.font = cell.font.copy(bold=True)
+                    font = copy(cell.font)
+                    font.bold = True
+                    cell.font = font
                     cell.data_type = "s" if isinstance(cell.value, str) else cell.data_type
             for row in rows:
                 sheet.append(row)
@@ -47,12 +51,15 @@ def office_spreadsheets(parameters: dict, player=None, speak=None) -> str:
                     if isinstance(cell.value, str):
                         cell.data_type = "s"
             workbook.save(output)
-            with load_workbook(output, read_only=True, data_only=False) as check:
+            check = load_workbook(output, read_only=True, data_only=False)
+            try:
                 if sheet_name not in check.sheetnames:
                     output.unlink(missing_ok=True)
                     return "Workbook validation failed; incomplete output removed."
                 checked_rows = check[sheet_name].max_row
                 checked_cols = check[sheet_name].max_column
+            finally:
+                check.close()
             return f"Created editable XLSX: {output}\nSheet: {sheet_name}\nRows: {checked_rows}; columns: {checked_cols}"
 
         if operation == "inspect_workbook":
@@ -62,13 +69,16 @@ def office_spreadsheets(parameters: dict, player=None, speak=None) -> str:
             source = resolve_user_path(raw, roots=user_accessible_roots(), must_exist=True)
             if not source.is_file() or source.suffix.lower() != ".xlsx":
                 return "Please provide an existing .xlsx file."
-            with load_workbook(source, read_only=True, data_only=True) as workbook:
+            workbook = load_workbook(source, read_only=True, data_only=True)
+            try:
                 parts = [f"Workbook: {source}", f"Sheets: {', '.join(workbook.sheetnames)}"]
                 for sheet in workbook.worksheets[:10]:
                     parts.append(f"\n[{sheet.title}] {sheet.max_row} rows × {sheet.max_column} columns")
                     for row in sheet.iter_rows(min_row=1, max_row=min(sheet.max_row, 8), values_only=True):
                         parts.append(" | ".join("" if value is None else str(value)[:200] for value in row[:20]))
                 return "\n".join(parts)[:12000]
+            finally:
+                workbook.close()
         return "Unsupported operation. Use create_workbook or inspect_workbook."
     except (OSError, ValueError, TypeError, PathPolicyError) as exc:
         return f"Spreadsheet operation failed safely: {exc}"
