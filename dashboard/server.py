@@ -553,9 +553,12 @@ class DashboardServer:
     # ── broadcast ────────────────────────────────────────────────────────
 
     async def broadcast(self, msg: dict) -> None:
-        self._history.append(msg)
-        if len(self._history) > 300:
-            self._history = self._history[-300:]
+        # Image payloads can be several MiB; send previews live but never retain
+        # base64 data in replay history or multiply memory use for future clients.
+        if msg.get("type") != "visual_preview":
+            self._history.append(msg)
+            if len(self._history) > 300:
+                self._history = self._history[-300:]
         dead: set[WebSocket] = set()
         for ws in list(self._clients):
             if not self._valid_token(self._client_tokens.get(ws, "")):
