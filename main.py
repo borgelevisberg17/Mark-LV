@@ -9,7 +9,8 @@ if _platform.system() == "Windows":
     class _Popen(_OrigPopen):
         def __init__(self, args, **kw):
             kw["creationflags"] = kw.get("creationflags", 0) | _subprocess.CREATE_NO_WINDOW
-            kw.pop("startupinfo", None)   # drop any stale/shared STARTUPINFO
+            # Preserve caller-supplied STARTUPINFO for flags, handles, and other
+            # process configuration; dropping it globally can break unrelated tools.
             super().__init__(args, **                       kw)
 
     _subprocess.Popen = _Popen
