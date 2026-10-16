@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import uuid
 import zipfile
 from pathlib import Path
@@ -19,7 +20,8 @@ _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 
 def _api_key() -> str:
     """Read the same local API-key configuration used by the main Gemini client."""
-    config_path = Path(__file__).resolve().parent.parent / "config" / "api_keys.json"
+    base_dir = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent.parent
+    config_path = base_dir / "config" / "api_keys.json"
     try:
         data = json.loads(config_path.read_text(encoding="utf-8"))
         key = str(data.get("gemini_api_key", "")).strip()
