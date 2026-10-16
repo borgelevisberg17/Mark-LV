@@ -243,14 +243,17 @@ Code for {file_path}:"""
             raise RateLimitError(str(e))
         raise
 
-def _install_dependencies(dependencies: list[str], project_dir: Path) -> str:
-    """Fail closed until dependency installation runs in an isolated worker."""
-    if not dependencies:
-        return "No external dependencies."
-    return (
-        "Dependency installation skipped: generated project code and packages "
-        "are not installed without a dedicated isolated runner."
-    )
+def _install_dependencies(
+    dependencies: list[str],
+    project_dir: Path,
+    manager: str = "pip",
+) -> str:
+    """Install declared packages from an already approved execution workflow."""
+    from core.execution import install_dependencies
+
+    return install_dependencies(dependencies, project_dir, timeout=180, manager=manager)
+
+
 
 def _open_vscode(project_dir: Path) -> bool:
     # Launch only a concrete executable; never pass a dynamic path through cmd.exe.
@@ -278,15 +281,66 @@ def _open_vscode(project_dir: Path) -> bool:
     return False
 
 def _run_project(run_command: str, project_dir: Path, timeout: int = 30) -> str:
-    """Do not execute generated project code in the main user's environment."""
-    return (
-        "Execution disabled: generated project code is not run until an "
-        "OS-enforced isolated runner is configured."
-    )
+    """Run a project command without shell interpretation."""
+    from core.execution import run_project_command
+
+    return run_project_command(run_command, project_dir, timeout=timeout)
+
 
 def _try_auto_install(error_output: str, project_dir: Path) -> bool:
-    """Automatic package installation is disabled pending isolated execution."""
-    return False
+    """Best-effort missing-package recovery, only inside the approved workflow."""
+    from core.execution import install_dependencies
+
+    python_match = re.search(r"No module named ['\"]([A-Za-z0-9_.-]+)['\"]", error_output, re.IGNORECASE)
+    node_match = re.search(r"(?:Cannot find module|Cannot find package) ['\"]([^'\"]+)['\"]", error_output, re.IGNORECASE)
+    manager = "pip"
+    package = None
+    if node_match:
+        package = node_match.group(1).strip()
+        manager = "npm"
+        if package.startswith((".", "/", "\\\\")):
+            return False
+    elif python_match:
+        package = python_match.group(1).split(".")[0]
+    if not package or package.startswith("-") or len(package) > 100:
+        return False
+    try:
+        result = install_dependencies([package], project_dir, timeout=180, manager=manager)
+        return not result.startswith("Process exited with code ")
+    except Exception as exc:
+        print(f"[DevAgent] Automatic dependency recovery failed: {exc}")
+        return False
+
+
+def _execute_project_workflow(
+    dependencies: list[str],
+    run_command: str,
+    project_dir: Path,
+    timeout: int,
+    language: str,
+    player=None,
+) -> str:
+    """Install declared dependencies, run the project and recover missing packages."""
+    manager = "npm" if language.lower() in {"javascript", "typescript", "js", "ts", "node"} else "pip"
+    if dependencies:
+        install_result = _install_dependencies(dependencies, project_dir, manager=manager)
+        if install_result.startswith("Process exited with code "):
+            return f"Dependency installation failed.\n{install_result}"
+    result = _run_project(run_command, project_dir, timeout=timeout)
+    for _ in range(2):
+        if _classify_error(result) != "dependency_error":
+            break
+        if not _try_auto_install(result, project_dir):
+            break
+        result = _run_project(run_command, project_dir, timeout=timeout)
+    if player:
+        try:
+            player.write_log(f"[DevAgent] Project execution result: {result[:12000]}")
+        except Exception:
+            pass
+    return result
+
+
 
 def _fix_files(
     error_output: str,
@@ -465,17 +519,36 @@ def _build_project(
         if speak: speak(msg)
         return msg
 
-    if dependencies:
-        log(_install_dependencies(dependencies, project_dir))
-
     _open_vscode(project_dir)
 
-    return (
-        f"Project '{proj_name}' files were generated and saved to: {project_dir}. "
-        "Automatic dependency installation and project execution are disabled "
-        "until an OS-enforced isolated runner is available. Review the files "
-        "before running them manually."
-    )
+    from core.execution import ExecutionPolicyError, parse_command, request_execution
+    try:
+        parse_command(run_command)
+        bounded_timeout = max(1, min(300, int(timeout or 30)))
+        manager = "npm" if language.lower() in {"javascript", "typescript", "js", "ts", "node"} else "pip"
+        dependency_summary = ", ".join(dependencies[:20]) if dependencies else "none declared"
+        if len(dependencies) > 20:
+            dependency_summary += f" (+{len(dependencies) - 20} more)"
+        return request_execution(
+            key=f"dev-agent-{proj_name}",
+            title=f"Install dependencies and run project: {proj_name}",
+            detail=(
+                f"Project: {project_dir}\n"
+                f"Command: {run_command}\n"
+                f"Package manager: {manager}\n"
+                f"Declared dependencies: {dependency_summary}\n"
+                f"Timeout per command: {bounded_timeout}s. If execution reports a missing "
+                "package, the assistant may try up to two automatic dependency-recovery "
+                "attempts. Commands run with your current user's permissions; this is not "
+                "an OS sandbox. Approve only if you trust the generated project."
+            ),
+            operation=lambda: _execute_project_workflow(
+                dependencies, run_command, project_dir, bounded_timeout, language, player
+            ),
+            player=player,
+        )
+    except (ExecutionPolicyError, OSError, ValueError) as exc:
+        return f"Project generated at {project_dir}, but execution could not be prepared: {exc}"
 
 
 def dev_agent(
@@ -489,7 +562,10 @@ def dev_agent(
     description  = p.get("description", "").strip()
     language     = p.get("language", "python").strip()
     project_name = p.get("project_name", "").strip()
-    timeout      = int(p.get("timeout", 30))
+    try:
+        timeout = max(1, min(300, int(p.get("timeout", 30))))
+    except (TypeError, ValueError):
+        return "Timeout must be an integer between 1 and 300 seconds."
 
     if not description:
         return "Please describe the project you want me to build, sir."
