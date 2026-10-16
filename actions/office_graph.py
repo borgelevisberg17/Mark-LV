@@ -252,7 +252,7 @@ def _safe_remote_path(raw: str) -> str:
     components = original.replace("\\", "/").split("/")
     if original in {".", ".."} or any(part in {"..", "."} for part in components):
         raise ValueError("OneDrive path cannot contain traversal.")
-    value = original.rstrip("/")
+    value = original.replace("\\", "/").rstrip("/")
     if not value:
         raise ValueError("A relative OneDrive path is required.")
     return value
