@@ -80,6 +80,7 @@ wmi;        sys_platform == "win32"
 pywinauto;  sys_platform == "win32"
 
 # ── Documents, media & hardware readouts ──────────────────────────────────────
+reportlab>=4,<5              # document_conversion — text-to-PDF export
 # Also try/except-guarded at the point of use. They are declared because a
 # feature that silently does nothing is worse than a slightly longer install.
 ddgs>=9,<10                  # web_search — the maintained successor to
