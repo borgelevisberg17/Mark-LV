@@ -21,7 +21,13 @@ from core.confirm import request as request_confirmation
 from core.path_policy import PathPolicyError, resolve_user_path, user_accessible_roots
 from actions._office_common import safe_filename, safe_output_directory, unique_output_path
 
-_TENANT = os.environ.get("MARKLV_MICROSOFT_TENANT", "common").strip()
+_TENANT = os.environ.get("MARKLV_MICROSOFT_TENANT", "").strip()
+if not _TENANT:
+    try:
+        _tenant_config = json.loads((Path(__file__).resolve().parent.parent / "config" / "microsoft_graph.json").read_text(encoding="utf-8"))
+        _TENANT = str(_tenant_config.get("tenant_id", "common")).strip()
+    except (OSError, ValueError, TypeError):
+        _TENANT = "common"
 if not re.fullmatch(r"[A-Za-z0-9.-]{1,128}", _TENANT):
     _TENANT = "common"
 _AUTHORITY = "https://login.microsoftonline.com/" + _TENANT
