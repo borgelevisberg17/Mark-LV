@@ -22,6 +22,7 @@ MAX_FILE_BYTES = 2 * 1024 * 1024
 MAX_TIMEOUT_SECONDS = 300
 DEFAULT_TIMEOUT_SECONDS = 60
 MAX_OUTPUT_CHARS = 12_000
+MAX_OUTPUT_BYTES = 1024 * 1024
 
 
 class ExecutionPolicyError(ValueError):
@@ -95,16 +96,19 @@ def _run_process(argv: Sequence[str], cwd: Path, timeout: int) -> str:
                 shell=False,
                 close_fds=True,
             )
+            deadline = time.monotonic() + timeout
             try:
-                return_code = process.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
+                while process.poll() is None:
+                    if stdout_path.stat().st_size + stderr_path.stat().st_size > MAX_OUTPUT_BYTES:
+                        raise ExecutionPolicyError("Process output exceeded the 1 MiB limit.")
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(f"Command timed out after {timeout}s.")
+                    time.sleep(0.05)
+                return_code = process.returncode
+            except (TimeoutError, ExecutionPolicyError):
                 process.kill()
                 process.wait()
-                output = stdout_path.read_bytes()[:MAX_OUTPUT_CHARS].decode("utf-8", "replace")
-                error = stderr_path.read_bytes()[:MAX_OUTPUT_CHARS].decode("utf-8", "replace")
-                raise TimeoutError(
-                    f"Command timed out after {timeout}s. Output: {output}\n{error}"
-                )
+                raise
         output = stdout_path.read_bytes()[:MAX_OUTPUT_CHARS].decode("utf-8", "replace")
         error = stderr_path.read_bytes()[:MAX_OUTPUT_CHARS].decode("utf-8", "replace")
     combined = (output + ("\n" + error if error else "")).strip()
