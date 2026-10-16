@@ -39,6 +39,8 @@ jobs:
         run: python -m unittest discover -s tests -p 'test_office_documents.py' -v
       - name: Test advanced Office editing and EPUB publishing
         run: python -m unittest discover -s tests -p 'test_office_editor.py' -v
+      - name: Test visual generation helpers and Office image insertion
+        run: python -m unittest discover -s tests -p 'test_visual_studio.py' -v
 
       - name: Test Microsoft 365 Graph operations (offline mocks)
         run: python -m unittest discover -s tests -p 'test_office_graph_enterprise.py' -v
