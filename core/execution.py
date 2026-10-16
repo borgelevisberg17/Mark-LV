@@ -214,7 +214,7 @@ def install_dependencies(dependencies: Sequence[str], project_dir: str | Path,
         raise ExecutionPolicyError("A maximum of 50 dependencies can be installed per request.")
     if manager not in {"pip", "npm"}:
         raise ExecutionPolicyError("Supported package managers are pip and npm.")
-    package_pattern = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@/-]{0,99}$")
+    package_pattern = re.compile(r"^@?[A-Za-z0-9][A-Za-z0-9._@/-]{0,99}$")
     packages = []
     for dependency in dependencies:
         if (not isinstance(dependency, str)
