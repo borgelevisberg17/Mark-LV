@@ -6,7 +6,8 @@ or filesystem authorization layer.
 
 ## Implemented in this phase
 
-- `office_documents`: create editable DOCX documents, create a basic reflowable EPUB, and inspect DOCX paragraph text.
+- `office_documents`: create editable DOCX documents, create a basic reflowable EPUB, inspect DOCX paragraph text, and open a verified local file directly.
+- `office_editor`: advanced editing for existing DOCX, XLSX/XLSM and PPTX files, with source-preserving edited copies by default. Supports DOCX run-level text replacement, structured content append, Word TOC field insertion, bibliography sections and cover images; XLSX cell updates, row append and worksheet creation; PPTX shape text replacement and slide append; and structured multi-chapter EPUB creation with navigation and an optional cover image.
 - `office_spreadsheets`: create editable XLSX workbooks and inspect existing XLSX sheets.
 - `office_presentations`: create editable PPTX presentations from slide titles, body text and bullet lists.
 - `image_tools`: inspect image metadata, resize, convert and compress images locally.
@@ -88,8 +89,10 @@ is not intentionally overwritten.
 
 ## Remaining limitations
 
-- EPUB generation creates a basic single-chapter ebook; it is not a full publishing
-  workflow with advanced typography, cover generation, metadata editor or TOC builder.
+- The advanced EPUB writer supports multiple chapters, a navigation TOC and optional cover image, but it is not a complete commercial publishing pipeline with EPUBCheck validation, advanced typography or full metadata editing.
+- Word TOC insertion creates a field; Microsoft Word (or a compatible editor) must update the field to calculate final page numbers.
+- DOCX text replacement intentionally matches within individual runs to avoid flattening rich formatting; it will not replace a phrase split across differently formatted runs.
+- The editor validates Office ZIP packages and reopens the generated files, but it does not guarantee preservation of every advanced feature, embedded object, macro or unsupported package extension. For XLSM, VBA is retained where openpyxl supports it; always validate business-critical workbooks in Excel.
 - Microsoft Forms general form creation is not represented as a working feature.
 - UI automation is not silently substituted for an unsupported API.
 - Email sending, event creation, file sharing, deletion and other remote side effects
