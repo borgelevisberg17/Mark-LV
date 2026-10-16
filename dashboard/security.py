@@ -78,3 +78,44 @@ class LoginAttemptLimiter:
             attempts.popleft()
         if not attempts:
             self._failures.pop(key, None)
+
+
+class SessionTokenRegistry:
+    """In-memory bearer-token expiry and revocation registry."""
+
+    def __init__(self, ttl_seconds: float = 8 * 60 * 60, clock: Callable[[], float] = time.monotonic) -> None:
+        if ttl_seconds <= 0:
+            raise ValueError("ttl_seconds must be positive")
+        self.ttl_seconds = ttl_seconds
+        self._clock = clock
+        self._expires_at: dict[str, float] = {}
+        self._lock = Lock()
+
+    def register(self, token: str) -> None:
+        if not token:
+            raise ValueError("token must not be empty")
+        with self._lock:
+            self._expires_at[token] = self._clock() + self.ttl_seconds
+
+    def is_valid(self, token: str) -> bool:
+        if not token:
+            return False
+        now = self._clock()
+        with self._lock:
+            expires_at = self._expires_at.get(token)
+            if expires_at is None:
+                return False
+            if expires_at <= now:
+                self._expires_at.pop(token, None)
+                return False
+            return True
+
+    def revoke(self, token: str) -> bool:
+        with self._lock:
+            return self._expires_at.pop(token, None) is not None
+
+    def clear(self) -> int:
+        with self._lock:
+            count = len(self._expires_at)
+            self._expires_at.clear()
+            return count
