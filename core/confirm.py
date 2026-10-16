@@ -93,9 +93,16 @@ def request(key: str, title: str, detail: str, run: Callable[[], str]) -> str:
         return (f"I cannot confirm '{title}' right now because the interface is "
                 f"not available, so I have not done it.")
 
+    now = time.monotonic()
     with _lock:
+        # The gate is shared by every action. Reject concurrent requests here,
+        # not only in individual callers, so a second request cannot silently
+        # replace the action the user is currently being asked to approve.
+        if _pending is not None and now - _pending.at <= TIMEOUT_SECONDS:
+            return ("There is already a confirmation waiting on screen. "
+                    "Ask the user to answer that one first. Nothing new was done.")
         _pending = _Pending(key=key, title=title, detail=detail,
-                            run=run, at=time.monotonic())
+                            run=run, at=now)
 
     try:
         _show_cb(title, detail)
