@@ -218,6 +218,31 @@ def _load_error(path: Path, plugins_dir: Path, exc: Exception) -> str:
     return f"Failed to load: {exc}"
 
 
+_ALLOWED_PLUGIN_PERMISSIONS = {"filesystem.read", "filesystem.write", "network", "process", "desktop", "clipboard", "system", "secrets", "package_install"}
+
+
+def _static_plugin_manifest(path: Path) -> dict:
+    """Inspect literal metadata without executing plugin code."""
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in tree.body:
+        targets = node.targets if isinstance(node, ast.Assign) else ([node.target] if isinstance(node, ast.AnnAssign) else [])
+        if any(isinstance(target, ast.Name) and target.id == "PLUGIN" for target in targets):
+            manifest = ast.literal_eval(node.value)
+            if isinstance(manifest, dict):
+                return manifest
+    raise ValueError("PLUGIN must be a literal dictionary to be inspected without executing code.")
+
+
+def _read_plugin_policy(plugins_dir: Path) -> dict:
+    """Read explicit user trust and capability grants; absent policy denies by default."""
+    path = plugins_dir.parent / "config" / "plugin_permissions.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data.get("plugins", {}) if isinstance(data.get("plugins", {}), dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
 def discover_plugins(plugins_dir: Path, core_tool_names: set[str],
                       logger: Callable[[str], None] = print,
                       notify: Callable[[str], None] | None = None) -> PluginRegistry:
@@ -237,6 +262,37 @@ def discover_plugins(plugins_dir: Path, core_tool_names: set[str],
         if path.name.startswith("_"):
             continue
         try:
+            manifest = _static_plugin_manifest(path)
+            manifest_name = manifest.get("name")
+            requested = manifest.get("permissions", [])
+            if not isinstance(manifest_name, str) or not _NAME_RE.match(manifest_name):
+                raise ValueError("PLUGIN name is missing or invalid.")
+            if not isinstance(requested, (list, tuple)) or any(
+                not isinstance(item, str) or item not in _ALLOWED_PLUGIN_PERMISSIONS
+                for item in requested
+            ):
+                raise ValueError("PLUGIN permissions contains an unknown capability.")
+            grant = plugin_policy.get(manifest_name, {})
+            granted = grant.get("permissions", []) if isinstance(grant, dict) else []
+            if not isinstance(grant, dict) or grant.get("trusted") is not True:
+                rec = PluginRecord(
+                    name=manifest_name, file=path.name,
+                    error="Untrusted extension was not imported or executed. Review it and add an explicit trust grant in config/plugin_permissions.json.",
+                )
+                all_records.append(rec)
+                logger(f"Plugin rejected: {path.name} — {rec.error}")
+                continue
+            if not isinstance(granted, list) or any(item not in _ALLOWED_PLUGIN_PERMISSIONS for item in granted):
+                raise ValueError("Trust policy contains an invalid permission list.")
+            missing = sorted(set(requested) - set(granted))
+            if missing:
+                rec = PluginRecord(
+                    name=manifest_name, file=path.name,
+                    error="Permission grant is missing: " + ", ".join(missing),
+                )
+                all_records.append(rec)
+                logger(f"Plugin rejected: {path.name} — {rec.error}")
+                continue
             module_name = f"plugins.{path.stem}"
             spec = importlib.util.spec_from_file_location(module_name, path)
             if spec is None or spec.loader is None:
