@@ -47,7 +47,7 @@ def request(key: str, title: str, detail: str, run: Callable[[], str],
     """Queue a human confirmation. The interface, not the model, approves it."""
     global _pending
     if _show_cb is None:
-        return f"I cannot confirm '{title}' because the interface is unavailable; nothing was done."
+        return f"I cannot confirm '{title}' because the interface is not available; nothing was done."
 
     now = time.monotonic()
     with _lock:
@@ -83,7 +83,7 @@ def request(key: str, title: str, detail: str, run: Callable[[], str],
         return f"Could not ask for confirmation: {exc}. Nothing was executed."
 
     _log(f"SYS: awaiting_confirmation id={operation_id} title={title}")
-    return (f"[OPERATION_STATUS] status=awaiting_confirmation operation_id={operation_id}. "
+    return (f"[CONFIRMATION_PENDING] [OPERATION_STATUS] status=awaiting_confirmation operation_id={operation_id}. "
             f"Confirmation is visible on screen for '{title}'. Ask the user to approve it there; do not claim completion.")
 
 
