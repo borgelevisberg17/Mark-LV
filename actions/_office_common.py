@@ -6,7 +6,7 @@ expose it as a tool.
 from __future__ import annotations
 
 import re
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from core.path_policy import PathPolicyError, resolve_child_path, resolve_user_path, user_accessible_roots
 
@@ -28,6 +28,8 @@ def safe_filename(raw_name: str, default_stem: str, extension: str) -> str:
     name = (raw_name or "").strip()
     if not name:
         name = default_stem
+    if PureWindowsPath(name).drive or PureWindowsPath(name).is_absolute():
+        raise PathPolicyError("Provide a filename only, without directories or traversal.")
     if "/" in name or "\\" in name or name in {".", ".."} or "\x00" in name:
         raise PathPolicyError("Provide a filename only, without directories or traversal.")
     path = Path(name)
