@@ -483,7 +483,7 @@ def _process_code(path: Path, action: str, params: dict, speak=None) -> str:
                     "Execution is limited to 60 seconds."
                 ),
                 operation=lambda: run_python_file(path, timeout=60),
-                player=speak,
+                player=params.get("_player"),
             )
         except (ExecutionPolicyError, OSError, ValueError) as exc:
             return f"Could not prepare Python execution: {exc}"
@@ -907,7 +907,7 @@ def file_processor(parameters: dict, player=None, speak=None) -> str:
     file_type   = _detect_type(path)
     action      = (parameters.get("action") or "").lower().strip()
     instruction = parameters.get("instruction", "")
-    params      = {**parameters, "instruction": instruction}
+    params      = {**parameters, "instruction": instruction, "_player": player}
 
     log_msg = f"[FileProcessor] {file_type.upper()} | {path.name} | action={action or 'auto'}"
     print(log_msg)
