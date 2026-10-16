@@ -10,7 +10,7 @@ from core.path_policy import PathPolicyError
 class OfficeActionContractTests(unittest.TestCase):
     def test_office_actions_declare_unique_valid_tools(self):
         from core.action_loader import _validate
-        from actions import office_documents, office_spreadsheets, office_presentations, image_tools, document_conversion
+        from actions import office_documents, office_spreadsheets, office_presentations, image_tools, document_conversion, office_graph, office_graph
 
         modules = [
             office_documents, office_spreadsheets, office_presentations,
@@ -24,7 +24,7 @@ class OfficeActionContractTests(unittest.TestCase):
             self.assertNotIn(record.name, names)
             names.add(record.name)
             self.assertTrue(callable(record.handler))
-        self.assertEqual(5, len(names))
+        self.assertEqual(6, len(names))
 
     def test_safe_filename_rejects_paths_and_traversal(self):
         for unsafe in ("../report", r"..\report", r"C:\report", "/tmp/report"):
@@ -45,6 +45,11 @@ class OfficeActionContractTests(unittest.TestCase):
         from actions.office_documents import office_documents
         result = office_documents({"operation": "delete_all"})
         self.assertIn("Unsupported operation", result)
+
+    def test_forms_creation_is_explicitly_not_supported(self):
+        from actions.office_graph import office_graph
+        result = office_graph({"operation": "forms_create"})
+        self.assertIn("not exposed by the supported public Microsoft Graph API", result)
 
 
 if __name__ == "__main__":
