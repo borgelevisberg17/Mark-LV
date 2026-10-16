@@ -366,8 +366,8 @@ def _insert_pptx(image_path: Path, raw_target: str, slide_index=None, caption: s
     picture = slide.shapes.add_picture(str(image_path), left, top, width=width, height=height)
     picture.name = "Mark-LV generated visual"
     if alt_text.strip():
-        picture._element._nvXxPr.cNvPr.set("descr", alt_text.strip()[:1000])
-        picture._element._nvXxPr.cNvPr.set("title", alt_text.strip()[:255])
+        picture._element.nvPicPr.cNvPr.set("descr", alt_text.strip()[:1000])
+        picture._element.nvPicPr.cNvPr.set("title", alt_text.strip()[:255])
     if replaced_shape is not None:
         shape_tree = slide.shapes._spTree
         shape_tree.insert(shape_tree.index(replaced_shape._element), picture._element)
