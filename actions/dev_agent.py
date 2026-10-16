@@ -486,6 +486,7 @@ def _build_project(
     if not isinstance(dependencies, list) or any(
         not isinstance(item, str) or not item.strip() for item in dependencies
     ):
+        return "The project planner returned an invalid dependency list."
 
     log(f"Project: {proj_name} | Files: {len(files)} | Entry: {entry_point}")
 
