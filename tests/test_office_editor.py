@@ -49,6 +49,29 @@ class OfficeEditorTests(unittest.TestCase):
         self.assertEqual("Aprovado: final", check.paragraphs[0].text)
         self.assertTrue(check.paragraphs[0].runs[1].bold)
 
+    def test_docx_replaces_text_across_runs_and_searches_header(self):
+        from docx import Document
+
+        source = self.docs / "cross-runs.docx"
+        doc = Document()
+        paragraph = doc.add_paragraph()
+        first = paragraph.add_run("inter")
+        first.bold = True
+        second = paragraph.add_run("venção concluída")
+        second.italic = True
+        doc.sections[0].header.paragraphs[0].add_run("intervenção antiga")
+        doc.save(source)
+        result = office_editor.office_editor({
+            "operation": "replace_text", "file_path": str(source),
+            "old_text": "intervenção", "new_text": "auditoria",
+        })
+        self.assertIn("Edited DOCX:", result)
+        check = Document(self.docs / "cross-runs-edited.docx")
+        self.assertEqual("auditoria concluída", check.paragraphs[0].text)
+        self.assertTrue(check.paragraphs[0].runs[0].bold)
+        self.assertTrue(check.paragraphs[0].runs[-1].italic)
+        self.assertIn("auditoria antiga", check.sections[0].header.paragraphs[0].text)
+
     def test_docx_adds_toc_field_and_bibliography(self):
         from docx import Document
 
@@ -100,6 +123,32 @@ class OfficeEditorTests(unittest.TestCase):
         self.assertEqual("s", check["Budget"]["A2"].data_type)
         check.close()
 
+    def test_xlsx_formula_and_formatting_edits(self):
+        from openpyxl import Workbook, load_workbook
+
+        source = self.docs / "formula.xlsx"
+        workbook = Workbook()
+        workbook.active.title = "Budget"
+        workbook.active["A1"] = 12
+        workbook.save(source)
+        formula_result = office_editor.office_editor({
+            "operation": "set_formulas", "file_path": str(source), "sheet_name": "Budget",
+            "formulas": {"B1": "=SUM(A1:A1)"},
+        })
+        self.assertIn("Set 1 formulas", formula_result)
+        formula_copy = self.docs / "formula-edited.xlsx"
+        format_result = office_editor.office_editor({
+            "operation": "format_cells", "file_path": str(formula_copy), "sheet_name": "Budget",
+            "formats": {"B1": {"bold": True, "fill_color": "FFF2CC", "number_format": "#,##0.00"}},
+        })
+        self.assertIn("Applied formatting", format_result)
+        final = load_workbook(self.docs / "formula-edited-edited.xlsx", data_only=False)
+        self.assertEqual("=SUM(A1:A1)", final["Budget"]["B1"].value)
+        self.assertTrue(final["Budget"]["B1"].font.bold)
+        self.assertEqual("FFFFF2CC", final["Budget"]["B1"].fill.fgColor.rgb)
+        self.assertEqual("#,##0.00", final["Budget"]["B1"].number_format)
+        final.close()
+
     def test_pptx_shape_text_edit_preserves_original_and_validates_copy(self):
         from pptx import Presentation
 
@@ -118,9 +167,51 @@ class OfficeEditorTests(unittest.TestCase):
         self.assertEqual("Original title", Presentation(source).slides[0].shapes[0].text)
         self.assertEqual("Revised title", Presentation(edited).slides[0].shapes[0].text)
 
+    def test_pptx_shape_replacement_clears_stale_paragraphs(self):
+        from pptx import Presentation
+
+        source = self.docs / "multi-line.pptx"
+        deck = Presentation()
+        slide = deck.slides.add_slide(deck.slide_layouts[6])
+        shape = slide.shapes.add_textbox(0, 0, 5000000, 1000000)
+        shape.text_frame.text = "Old first line\nOld second line"
+        deck.save(source)
+        result = office_editor.office_editor({
+            "operation": "replace_shape_text", "file_path": str(source),
+            "slide_index": 0, "shape_index": 0, "text": "New title",
+        })
+        self.assertIn("Replaced all text", result)
+        edited = Presentation(self.docs / "multi-line-edited.pptx")
+        self.assertEqual("New title", edited.slides[0].shapes[0].text)
+
+    def test_xlsx_with_chart_fails_closed_without_silent_loss(self):
+        from openpyxl import Workbook, load_workbook
+        from openpyxl.chart import BarChart, Reference
+
+        source = self.docs / "chart.xlsx"
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet["A1"] = "Category"
+        sheet["A2"] = "A"
+        sheet["B1"] = "Value"
+        sheet["B2"] = 5
+        chart = BarChart()
+        chart.add_data(Reference(sheet, min_col=2, min_row=1, max_row=2), titles_from_data=True)
+        chart.set_categories(Reference(sheet, min_col=1, min_row=2, max_row=2))
+        sheet.add_chart(chart, "D2")
+        workbook.save(source)
+        result = office_editor.office_editor({
+            "operation": "set_cells", "file_path": str(source), "cells": {"B2": 9},
+        })
+        self.assertIn("Editing stopped to protect workbook features", result)
+        self.assertFalse((self.docs / "chart-edited.xlsx").exists())
+        check = load_workbook(source)
+        self.assertEqual(1, len(check.active._charts))
+        check.close()
+
     def test_multichapter_epub_has_navigation_and_valid_package(self):
         result = office_editor.office_editor({
-            "operation": "create_epub", "title": "Livro de teste",
+            "operation": "create_epub", "title": "Livro de teste", "author": "Autora de teste", "language": "pt-AO", "description": "Descrição do livro",
             "output_dir": str(self.docs),
             "chapters": [
                 {"title": "Introdução", "content": "Primeiro parágrafo.\n\nSegundo parágrafo."},
@@ -135,6 +226,10 @@ class OfficeEditorTests(unittest.TestCase):
             self.assertIsNone(book.testzip())
             self.assertIn(b"Introdu\xc3\xa7\xc3\xa3o", book.read("OEBPS/nav.xhtml"))
             self.assertIn("OEBPS/chapter-002.xhtml", book.namelist())
+            opf = book.read("OEBPS/content.opf")
+            self.assertIn(b"Autora de teste", opf)
+            self.assertIn(b"pt-AO", opf)
+            self.assertIn(b"Descri", opf)
 
     def test_action_is_discoverable_by_existing_registry(self):
         from core.action_loader import discover_actions

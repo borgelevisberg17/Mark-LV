@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import html
 import os
+from copy import copy
 import re
 import uuid
 import zipfile
@@ -64,13 +65,123 @@ def _save_package(source: Path, destination: Path, writer) -> str:
 
 
 def _replace_paragraph_runs(paragraph, old: str, new: str) -> bool:
-    """Replace within one run to preserve all surrounding run formatting."""
-    changed = False
-    for run in paragraph.runs:
-        if old in run.text:
-            run.text = run.text.replace(old, new)
-            changed = True
-    return changed
+    """Replace across run boundaries while retaining unaffected formatting."""
+    runs = list(paragraph.runs)
+    texts = [run.text for run in runs]
+    combined = "".join(texts)
+    if old not in combined:
+        return False
+    offsets, cursor = [], 0
+    for value in texts:
+        offsets.append((cursor, cursor + len(value)))
+        cursor += len(value)
+    matches, cursor = [], 0
+    while True:
+        position = combined.find(old, cursor)
+        if position < 0:
+            break
+        matches.append((position, position + len(old)))
+        cursor = position + len(old)
+    for match_start, match_end in reversed(matches):
+        first_index = next((i for i, (start, end) in enumerate(offsets)
+                            if start <= match_start < end), None)
+        last_index = next((i for i, (start, end) in enumerate(offsets)
+                           if start < match_end <= end), None)
+        if first_index is None or last_index is None:
+            continue
+        first_local = match_start - offsets[first_index][0]
+        last_local_end = match_end - offsets[last_index][0]
+        if first_index == last_index:
+            value = runs[first_index].text
+            runs[first_index].text = value[:first_local] + new + value[last_local_end:]
+        else:
+            first_value, last_value = runs[first_index].text, runs[last_index].text
+            runs[first_index].text = first_value[:first_local] + new
+            for i in range(first_index + 1, last_index):
+                runs[i].text = ""
+            runs[last_index].text = last_value[last_local_end:]
+    return True
+
+
+def _iter_docx_paragraphs(container, seen=None):
+    """Yield paragraphs from document parts and nested tables without duplicates."""
+    if seen is None:
+        seen = set()
+    for paragraph in getattr(container, "paragraphs", ()):
+        identity = id(paragraph._p)
+        if identity not in seen:
+            seen.add(identity)
+            yield paragraph
+    for table in getattr(container, "tables", ()):
+        for row in table.rows:
+            for cell in row.cells:
+                yield from _iter_docx_paragraphs(cell, seen)
+
+
+def _assert_xlsx_supported_features(source: Path, params: dict) -> None:
+    """Fail closed for package features openpyxl may silently drop on save."""
+    risky_prefixes = (
+        "xl/charts/", "xl/drawings/", "xl/pivotTables/", "xl/pivotCache/",
+        "xl/slicers/", "xl/externalLinks/", "xl/embeddings/", "xl/activeX/",
+        "xl/threadedComments/", "xl/persons/", "customXml/",
+    )
+    try:
+        with zipfile.ZipFile(source) as package:
+            names = package.namelist()
+            if len(names) > 10000 or sum(item.file_size for item in package.infolist()) > 500 * 1024 * 1024:
+                raise ValueError("Workbook package exceeds the safe inspection limits.")
+            unsupported = sorted({prefix.rstrip("/") for name in names for prefix in risky_prefixes
+                                  if name.startswith(prefix)})
+    except zipfile.BadZipFile as exc:
+        raise ValueError("Workbook is not a valid XLSX/XLSM package.") from exc
+    if unsupported and params.get("allow_unsupported_features") is not True:
+        features = ", ".join(unsupported[:6])
+        raise ValueError(
+            "Editing stopped to protect workbook features that openpyxl may not preserve "
+            f"({features}). Use native Excel editing, or explicitly set allow_unsupported_features=true "
+            "only after accepting possible feature loss."
+        )
+
+
+def _validate_epub_package(path: Path) -> None:
+    """Validate EPUB ZIP structure, XML well-formedness, manifest/spine and local links."""
+    with zipfile.ZipFile(path) as book:
+        names = book.namelist()
+        if not names or names[0] != "mimetype":
+            raise zipfile.BadZipFile("EPUB mimetype must be the first package entry.")
+        info = book.getinfo("mimetype")
+        if info.compress_type != zipfile.ZIP_STORED or book.read("mimetype") != b"application/epub+zip":
+            raise zipfile.BadZipFile("EPUB mimetype must be present and uncompressed.")
+        if book.testzip():
+            raise zipfile.BadZipFile("Generated EPUB contains a corrupt ZIP member.")
+        parsed = {name: ET.fromstring(book.read(name)) for name in names
+                  if name.endswith((".xml", ".opf", ".xhtml"))}
+        if "META-INF/container.xml" not in parsed or "OEBPS/content.opf" not in parsed:
+            raise ValueError("EPUB container or package document is missing.")
+        ns = {"opf": "http://www.idpf.org/2007/opf"}
+        opf = parsed["OEBPS/content.opf"]
+        manifest = {item.attrib.get("id"): item.attrib.get("href")
+                    for item in opf.findall("./opf:manifest/opf:item", ns)}
+        if not manifest or any(not key or not href for key, href in manifest.items()):
+            raise ValueError("EPUB manifest contains an item without an id or href.")
+        for href in manifest.values():
+            if str(Path("OEBPS") / href).replace("\\", "/") not in names:
+                raise ValueError(f"EPUB manifest points to a missing resource: {href}")
+        spine = opf.findall("./opf:spine/opf:itemref", ns)
+        if not spine or any(item.attrib.get("idref") not in manifest for item in spine):
+            raise ValueError("EPUB spine references a missing manifest item.")
+        for name, root in parsed.items():
+            if not name.endswith((".xhtml", ".opf")):
+                continue
+            base = Path(name).parent
+            for element in root.iter():
+                for attr in ("href", "src"):
+                    value = element.attrib.get(attr, "")
+                    if not value or value.startswith(("#", "http:", "https:", "mailto:", "data:")):
+                        continue
+                    local = value.split("#", 1)[0].split("?", 1)[0]
+                    if local and str(base / local).replace("\\", "/") not in names:
+                        raise ValueError(f"EPUB link points to a missing resource: {name} -> {value}")
 
 
 def _docx_edit(params: dict) -> str:
@@ -95,16 +206,23 @@ def _docx_edit(params: dict) -> str:
             raise ValueError("old_text must be a non-empty string.")
         if not isinstance(new, str):
             raise ValueError("new_text must be a string.")
-        for paragraph in doc.paragraphs:
+        paragraphs = list(_iter_docx_paragraphs(doc))
+        for section in doc.sections:
+            for part_name in ("header", "footer", "first_page_header", "first_page_footer",
+                              "even_page_header", "even_page_footer"):
+                part = getattr(section, part_name, None)
+                if part is not None:
+                    paragraphs.extend(_iter_docx_paragraphs(part))
+        seen = set()
+        for paragraph in paragraphs:
+            identity = id(paragraph._p)
+            if identity in seen:
+                continue
+            seen.add(identity)
             changes += int(_replace_paragraph_runs(paragraph, old, new))
-        for table in doc.tables:
-            for row in table.rows:
-                for cell in row.cells:
-                    for paragraph in cell.paragraphs:
-                        changes += int(_replace_paragraph_runs(paragraph, old, new))
         if changes == 0:
-            return f"No matching text was found inside a single formatted text run. Source unchanged: {source}"
-        summary = f"Replaced matching text in {changes} paragraph/run locations."
+            return f"No matching text was found in editable DOCX paragraphs. Source unchanged: {source}"
+        summary = f"Replaced matching text in {changes} paragraphs, including supported table/header/footer content."
 
     elif operation == "append_content":
         blocks = params.get("blocks")
@@ -213,6 +331,7 @@ def _docx_edit(params: dict) -> str:
 def _xlsx_edit(params: dict) -> str:
     from openpyxl import load_workbook
     source = _source_path(str(params.get("file_path", "") or ""), {".xlsx", ".xlsm"})
+    _assert_xlsx_supported_features(source, params)
     operation = str(params["operation"])
     destination = _destination(source, params, source.suffix.lower())
     keep_vba = source.suffix.lower() == ".xlsm"
@@ -236,6 +355,86 @@ def _xlsx_edit(params: dict) -> str:
                 if isinstance(value, str):
                     cell.data_type = "s"
             summary = f"Updated {len(cells)} cells in '{sheet_name}'."
+        elif operation == "set_formulas":
+            formulas = params.get("formulas")
+            if not isinstance(formulas, dict) or not formulas or len(formulas) > 1000:
+                raise ValueError("formulas must be a non-empty object of A1 addresses to formulas (max 1,000).")
+            for address, formula in formulas.items():
+                if not isinstance(address, str) or not re.fullmatch(r"[A-Za-z]{1,3}[1-9][0-9]{0,6}", address):
+                    raise ValueError(f"Invalid A1 cell address: {address}")
+                if not isinstance(formula, str) or not formula.startswith("=") or len(formula) > 8192:
+                    raise ValueError(f"Formula for {address} must be a string beginning with '=' and at most 8,192 characters.")
+                sheet[address.upper()] = formula
+            summary = f"Set {len(formulas)} formulas in '{sheet_name}'. Excel will calculate formula results when opened."
+        elif operation == "format_cells":
+            formats = params.get("formats")
+            if not isinstance(formats, dict) or not formats or len(formats) > 1000:
+                raise ValueError("formats must be a non-empty object of A1 addresses to style objects (max 1,000).")
+            allowed = {"bold", "italic", "font_size", "font_name", "font_color", "fill_color",
+                       "number_format", "horizontal_alignment", "wrap_text"}
+            alignments = {"general", "left", "center", "right", "fill", "justify", "centerContinuous", "distributed"}
+            from openpyxl.styles import Alignment, Font, PatternFill
+            for address, style in formats.items():
+                if not isinstance(address, str) or not re.fullmatch(r"[A-Za-z]{1,3}[1-9][0-9]{0,6}", address):
+                    raise ValueError(f"Invalid A1 cell address: {address}")
+                if not isinstance(style, dict) or not style or set(style) - allowed:
+                    raise ValueError(f"Formatting for {address} must use supported style properties only: {', '.join(sorted(allowed))}.")
+                cell = sheet[address.upper()]
+                font = copy(cell.font)
+                if "bold" in style:
+                    if not isinstance(style["bold"], bool):
+                        raise ValueError(f"bold for {address} must be boolean.")
+                    font.bold = style["bold"]
+                if "italic" in style:
+                    if not isinstance(style["italic"], bool):
+                        raise ValueError(f"italic for {address} must be boolean.")
+                    font.italic = style["italic"]
+                if "font_size" in style:
+                    size = style["font_size"]
+                    if isinstance(size, bool) or not isinstance(size, (int, float)) or not 1 <= size <= 72:
+                        raise ValueError(f"font_size for {address} must be between 1 and 72.")
+                    font.sz = size
+                if "font_name" in style:
+                    name = style["font_name"]
+                    if not isinstance(name, str) or not name.strip() or len(name) > 64:
+                        raise ValueError(f"font_name for {address} must be a non-empty string of at most 64 characters.")
+                    font.name = name
+                if "font_color" in style:
+                    color = style["font_color"]
+                    if not isinstance(color, str) or not re.fullmatch(r"(?:[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})", color):
+                        raise ValueError(f"font_color for {address} must be a 6- or 8-digit hexadecimal RGB/ARGB value.")
+                    font.color = color if len(color) == 8 else "FF" + color
+                cell.font = font
+                if "fill_color" in style:
+                    color = style["fill_color"]
+                    if not isinstance(color, str) or not re.fullmatch(r"(?:[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})", color):
+                        raise ValueError(f"fill_color for {address} must be a 6- or 8-digit hexadecimal RGB/ARGB value.")
+                    cell.fill = PatternFill(fill_type="solid", fgColor=color if len(color) == 8 else "FF" + color)
+                if "number_format" in style:
+                    number_format = style["number_format"]
+                    if not isinstance(number_format, str) or not number_format or len(number_format) > 64:
+                        raise ValueError(f"number_format for {address} must be a non-empty string of at most 64 characters.")
+                    cell.number_format = number_format
+                if "horizontal_alignment" in style:
+                    alignment = style["horizontal_alignment"]
+                    if alignment not in alignments:
+                        raise ValueError(f"Unsupported horizontal_alignment for {address}: {alignment}")
+                    cell.alignment = copy(cell.alignment)
+                    cell.alignment = Alignment(
+                        horizontal=alignment, vertical=cell.alignment.vertical,
+                        text_rotation=cell.alignment.textRotation, wrap_text=cell.alignment.wrap_text,
+                        shrink_to_fit=cell.alignment.shrink_to_fit, indent=cell.alignment.indent,
+                    )
+                if "wrap_text" in style:
+                    if not isinstance(style["wrap_text"], bool):
+                        raise ValueError(f"wrap_text for {address} must be boolean.")
+                    cell.alignment = copy(cell.alignment)
+                    cell.alignment = Alignment(
+                        horizontal=cell.alignment.horizontal, vertical=cell.alignment.vertical,
+                        text_rotation=cell.alignment.textRotation, wrap_text=style["wrap_text"],
+                        shrink_to_fit=cell.alignment.shrink_to_fit, indent=cell.alignment.indent,
+                    )
+            summary = f"Applied formatting to {len(formats)} cells in '{sheet_name}'."
         elif operation == "append_rows":
             rows = params.get("rows")
             if not isinstance(rows, list) or not rows or len(rows) > 10000:
@@ -258,6 +457,15 @@ def _xlsx_edit(params: dict) -> str:
                 raise ValueError(f"Worksheet already exists: {name}")
             workbook.create_sheet(name)
             summary = f"Created worksheet '{name}'."
+        elif operation == "rename_sheet":
+            new_name = str(params.get("new_sheet_name", "")).strip()
+            if not new_name or len(new_name) > 31 or any(char in new_name for char in r'[]:*?/\\'):
+                raise ValueError("new_sheet_name must be 1–31 characters and cannot contain []:*?/\\.")
+            if new_name in workbook.sheetnames and new_name != sheet_name:
+                raise ValueError(f"Worksheet already exists: {new_name}")
+            workbook[sheet_name].title = new_name
+            sheet_name = new_name
+            summary = f"Renamed worksheet to '{new_name}'."
         else:
             raise ValueError(f"Unsupported XLSX operation: {operation}")
         def writer(temp):
@@ -294,14 +502,17 @@ def _pptx_edit(params: dict) -> str:
         shape = shapes[shape_index]
         if not shape.has_text_frame:
             raise ValueError("The selected shape does not contain editable text.")
-        paragraph = shape.text_frame.paragraphs[0]
+        paragraphs = list(shape.text_frame.paragraphs)
+        paragraph = paragraphs[0]
         if paragraph.runs:
             paragraph.runs[0].text = text
             for run in paragraph.runs[1:]:
                 run.text = ""
         else:
             paragraph.add_run().text = text
-        summary = f"Updated text in slide {slide_index + 1}, shape {shape_index + 1}."
+        for extra in paragraphs[1:]:
+            extra._p.getparent().remove(extra._p)
+        summary = f"Replaced all text in slide {slide_index + 1}, shape {shape_index + 1}; first-paragraph formatting retained."
     elif operation == "append_slides":
         slides = params.get("slides")
         if not isinstance(slides, list) or not slides or len(slides) > 50:
@@ -340,9 +551,15 @@ def _pptx_edit(params: dict) -> str:
 
 def _create_epub(params: dict) -> str:
     title = str(params.get("title", "")).strip()
+    author = str(params.get("author", "Mark-LV")).strip() or "Mark-LV"
+    language = str(params.get("language", "pt")).strip() or "pt"
+    description = str(params.get("description", "")).strip()
     chapters = params.get("chapters")
     if not title:
         raise ValueError("title is required.")
+    for label, value in (("title", title), ("author", author), ("language", language), ("description", description)):
+        if re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", value):
+            raise ValueError(f"{label} contains characters not allowed in XML.")
     if not isinstance(chapters, list) or not chapters or len(chapters) > 100:
         raise ValueError("chapters must be a list of 1–100 chapter objects.")
     if any(not isinstance(ch, dict) or not isinstance(ch.get("title"), str) or not isinstance(ch.get("content"), str) for ch in chapters):
@@ -367,12 +584,15 @@ def _create_epub(params: dict) -> str:
     for index, chapter in enumerate(chapters, 1):
         filename = f"chapter-{index:03d}.xhtml"
         chapter_title = chapter["title"].strip() or f"Chapter {index}"
+        content = chapter["content"]
+        if re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", chapter_title + content):
+            raise ValueError(f"Chapter {index} contains characters not allowed in XML.")
         blocks = []
-        for paragraph in chapter["content"].split("\n\n"):
+        for paragraph in content.split("\n\n"):
             if paragraph.strip():
                 blocks.append("<p>" + html.escape(paragraph.strip()).replace("\n", "<br/>") + "</p>")
         xhtml = ('<?xml version="1.0" encoding="utf-8"?>'
-          '<html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><title>'
+          '<html xmlns="http://www.w3.org/1999/xhtml" lang="' + html.escape(language) + '"><head><title>'
           + html.escape(chapter_title) + '</title><meta charset="utf-8"/></head><body><h1>'
           + html.escape(chapter_title) + '</h1>' + "".join(blocks) + '</body></html>')
         entries[f"OEBPS/{filename}"] = xhtml
@@ -403,7 +623,9 @@ def _create_epub(params: dict) -> str:
       '<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="book-id">'
       '<metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="book-id">'
       + identifier + '</dc:identifier><dc:title>' + html.escape(title)
-      + '</dc:title><dc:language>pt</dc:language><dc:creator>Mark-LV</dc:creator>'
+      + '</dc:title><dc:language>' + html.escape(language) + '</dc:language><dc:creator>'
+      + html.escape(author) + '</dc:creator>'
+      + ('<dc:description>' + html.escape(description) + '</dc:description>' if description else '')
       + cover_meta + '</metadata><manifest>' + "".join(manifest) + cover_manifest
       + '</manifest><spine>' + "".join(spine) + '</spine></package>')
     entries["OEBPS/content.opf"] = opf
@@ -413,11 +635,7 @@ def _create_epub(params: dict) -> str:
             book.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
             for name, value in entries.items():
                 book.writestr(name, value, compress_type=zipfile.ZIP_DEFLATED)
-        with zipfile.ZipFile(temporary) as book:
-            if book.namelist()[0] != "mimetype" or book.testzip():
-                raise zipfile.BadZipFile("Generated EPUB failed package validation.")
-            ET.fromstring(book.read("OEBPS/content.opf"))
-            ET.fromstring(book.read("OEBPS/nav.xhtml"))
+        _validate_epub_package(temporary)
         os.replace(temporary, output)
     finally:
         temporary.unlink(missing_ok=True)
@@ -430,7 +648,7 @@ def office_editor(parameters: dict, player=None, speak=None) -> str:
     try:
         if operation in {"replace_text", "append_content", "add_toc", "add_references", "insert_cover"}:
             return _docx_edit(params)
-        if operation in {"set_cells", "append_rows", "add_sheet"}:
+        if operation in {"set_cells", "set_formulas", "format_cells", "append_rows", "add_sheet", "rename_sheet"}:
             return _xlsx_edit(params)
         if operation in {"replace_shape_text", "append_slides"}:
             return _pptx_edit(params)
@@ -450,19 +668,22 @@ TOOL = {
     "name": "office_editor",
     "description": (
         "Advanced editing for existing Word DOCX, Excel XLSX/XLSM, and PowerPoint PPTX files, "
-        "plus structured multi-chapter EPUB publishing. Operations: replace_text (within individual DOCX text runs), "
+        "plus structured multi-chapter EPUB publishing with metadata and structural validation. Operations: replace_text across DOCX runs, "
         "append_content (paragraphs/headings/bullets/numbers/page breaks), add_toc (inserts a Word TOC field; user must update it in Word), "
-        "add_references, insert_cover, set_cells, append_rows, add_sheet, replace_shape_text, append_slides, create_epub. "
+        "add_references, insert_cover, set_cells, set_formulas, format_cells, append_rows, add_sheet, rename_sheet, replace_shape_text, append_slides, create_epub. "
         "Existing source files are preserved by default and an edited copy is created. Only set in_place=true when the user explicitly asks to overwrite the source. "
-        "DOCX replacements preserve run formatting but do not match text split across multiple differently formatted runs. "
-        "Use exact local file_path values. Files are reopened and validated before success is reported."
+        "DOCX replacements preserve unaffected run formatting and search supported body, table, header and footer paragraphs. "
+        "XLSX/XLSM supports literal cell edits, explicit formulas, formatting, row append and sheet create/rename; it refuses charts, drawings, pivots, external links and embedded parts by default because openpyxl may drop them. "
+        "PPTX replacement clears stale paragraphs and retains first-paragraph formatting. EPUB output validates XML, manifest/spine and local links. "
+        "Use exact local file_path values; source files are copied by default."
     ),
     "parameters": {
         "type": "OBJECT",
         "properties": {
-            "operation": {"type": "STRING", "description": "replace_text | append_content | add_toc | add_references | insert_cover | set_cells | append_rows | add_sheet | replace_shape_text | append_slides | create_epub"},
+            "operation": {"type": "STRING", "description": "replace_text | append_content | add_toc | add_references | insert_cover | set_cells | set_formulas | format_cells | append_rows | add_sheet | rename_sheet | replace_shape_text | append_slides | create_epub"},
             "file_path": {"type": "STRING", "description": "Existing DOCX/XLSX/XLSM/PPTX source file path"},
             "in_place": {"type": "BOOLEAN", "description": "Default false: save a new edited copy and preserve source. Set true only with explicit user authorization to overwrite."},
+            "allow_unsupported_features": {"type": "BOOLEAN", "description": "XLSX/XLSM only: accept possible loss of chart, drawing, pivot, external-link or embedded features. Never set without explicit user authorization to accept that risk."},
             "output_dir": {"type": "STRING", "description": "Optional output directory within the permitted user roots"},
             "filename": {"type": "STRING", "description": "Optional output filename only"},
             "old_text": {"type": "STRING", "description": "replace_text: text to replace inside a single DOCX run"},
@@ -473,7 +694,9 @@ TOOL = {
             "image_path": {"type": "STRING", "description": "insert_cover: local PNG or JPEG cover image path"},
             "cover_title": {"type": "STRING", "description": "insert_cover: optional title to place on the cover"},
             "sheet_name": {"type": "STRING", "description": "XLSX: target sheet name; defaults to active sheet"},
-            "cells": {"type": "OBJECT", "description": "set_cells: mapping of A1 cell addresses to scalar values"},
+            "cells": {"type": "OBJECT", "description": "set_cells: mapping of A1 cell addresses to scalar values; strings remain literal text, not formulas"},
+            "formulas": {"type": "OBJECT", "description": "set_formulas: mapping of A1 cell addresses to Excel formulas beginning with '='"},
+            "formats": {"type": "OBJECT", "description": "format_cells: mapping of A1 cell addresses to style objects using bold, italic, font_size, font_name, font_color, fill_color, number_format, horizontal_alignment, wrap_text"},
             "rows": {"type": "ARRAY", "items": {"type": "ARRAY", "items": {"type": "STRING"}}, "description": "append_rows: row arrays to append"},
             "new_sheet_name": {"type": "STRING", "description": "add_sheet: new worksheet name"},
             "slide_index": {"type": "INTEGER", "description": "replace_shape_text: zero-based slide index"},
@@ -482,7 +705,10 @@ TOOL = {
             "slides": {"type": "ARRAY", "items": {"type": "OBJECT"}, "description": "append_slides: slide objects with title, optional body and bullets"},
             "title": {"type": "STRING", "description": "create_epub: book title"},
             "chapters": {"type": "ARRAY", "items": {"type": "OBJECT"}, "description": "create_epub: chapter objects with title and content strings"},
-            "cover_image_path": {"type": "STRING", "description": "create_epub: optional PNG/JPEG cover image path"}
+            "cover_image_path": {"type": "STRING", "description": "create_epub: optional PNG/JPEG cover image path"},
+            "author": {"type": "STRING", "description": "create_epub: author metadata; defaults to Mark-LV"},
+            "language": {"type": "STRING", "description": "create_epub: BCP 47 language tag; defaults to pt"},
+            "description": {"type": "STRING", "description": "create_epub: optional book description metadata"}
         },
         "required": ["operation"]
     },

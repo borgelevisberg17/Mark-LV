@@ -7,7 +7,7 @@ or filesystem authorization layer.
 ## Implemented in this phase
 
 - `office_documents`: create editable DOCX documents, create a basic reflowable EPUB, inspect DOCX paragraph text, and open a verified local file directly.
-- `office_editor`: advanced editing for existing DOCX, XLSX/XLSM and PPTX files, with source-preserving edited copies by default. Supports DOCX run-level text replacement, structured content append, Word TOC field insertion, bibliography sections and cover images; XLSX cell updates, row append and worksheet creation; PPTX shape text replacement and slide append; and structured multi-chapter EPUB creation with navigation and an optional cover image.
+- `office_editor`: advanced editing for existing DOCX, XLSX/XLSM and PPTX files, with source-preserving edited copies by default. DOCX replacement spans differently formatted runs and searches supported body, nested table, header and footer paragraphs; also supports structured content append, Word TOC fields, bibliography sections and cover images. XLSX/XLSM supports literal cell updates, explicit formulas, cell formatting, row append and worksheet create/rename. PPTX supports shape text replacement and slide append. EPUB creation supports chapters, author/language/description metadata, navigation and an optional cover image, with ZIP/XML/manifest/spine/local-link validation.
 - `office_spreadsheets`: create editable XLSX workbooks and inspect existing XLSX sheets.
 - `office_presentations`: create editable PPTX presentations from slide titles, body text and bullet lists.
 - `image_tools`: inspect image metadata, resize, convert and compress images locally.
@@ -89,10 +89,11 @@ is not intentionally overwritten.
 
 ## Remaining limitations
 
-- The advanced EPUB writer supports multiple chapters, a navigation TOC and optional cover image, but it is not a complete commercial publishing pipeline with EPUBCheck validation, advanced typography or full metadata editing.
+- EPUB output receives built-in package and internal-reference validation, but commercial release should also run the official [EPUBCheck](https://www.w3.org/publishing/epubcheck/) validator. Built-in checks are not full standards conformance validation and do not provide advanced typesetting or all publishing-platform metadata.
 - Word TOC insertion creates a field; Microsoft Word (or a compatible editor) must update the field to calculate final page numbers.
-- DOCX text replacement intentionally matches within individual runs to avoid flattening rich formatting; it will not replace a phrase split across differently formatted runs.
-- The editor validates Office ZIP packages and reopens the generated files, but it does not guarantee preservation of every advanced feature, embedded object, macro or unsupported package extension. For XLSM, VBA is retained where openpyxl supports it; always validate business-critical workbooks in Excel.
+- DOCX replacement spans run boundaries while preserving unaffected run formatting. The replacement text inherits the first matched run's formatting; editing tracked changes, text boxes, footnotes, equations and all other uncommon Word story parts is not guaranteed.
+- XLSX/XLSM edits fail closed when chart/drawing/pivot/external-link/embedded package parts are detected, unless the user explicitly authorizes possible feature loss. Formula results are calculated by Excel, not by openpyxl. For XLSM, VBA preservation is supported where openpyxl can retain it, but business-critical workbooks still require Excel validation.
+- PPTX shape replacement retains the first paragraph's formatting and removes later paragraphs in that selected shape. Complex chart editing, SmartArt, embedded OLE objects, animations and all theme-level layout changes are not implemented by this action.
 - Microsoft Forms general form creation is not represented as a working feature.
 - UI automation is not silently substituted for an unsupported API.
 - Email sending, event creation, file sharing, deletion and other remote side effects
