@@ -167,7 +167,7 @@ def _compose_cover_text(image_path: Path, params: dict) -> Path:
     return output
 
 
-def _preflight_target(raw_target: str, slide_index=None, pptx_placement=None, shape_index=None) -> Path | None:
+def _preflight_target(raw_target: str, slide_index=None, pptx_placement=None, shape_index=None, docx_insertion_mode=None, insert_after_text=None) -> Path | None:
     """Validate an Office target before consuming image-generation quota."""
     if not raw_target.strip():
         return None
@@ -191,6 +191,12 @@ def _preflight_target(raw_target: str, slide_index=None, pptx_placement=None, sh
                 raise ValueError("replace_picture requires shape_index to identify an existing picture.")
     elif str(pptx_placement or "").lower() == "replace_picture":
         raise ValueError("replace_picture requires slide_index and shape_index.")
+    if target.suffix.lower() == ".docx" and str(docx_insertion_mode or "").lower() == "inline" and str(insert_after_text or "").strip():
+        from docx import Document
+        document = Document(target)
+        anchor = str(insert_after_text).strip()
+        if not any(anchor in paragraph.text for paragraph in _iter_docx_paragraphs(document)):
+            raise ValueError(f"insert_after_text was not found in the document: {anchor[:120]}")
     return target
 
 
@@ -429,7 +435,7 @@ def visual_studio(parameters: dict, player=None, speak=None, dashboard=None, eve
         if operation in {"generate", "edit"}:
             target = str(params.get("target_file_path", "") or "").strip()
             if target:
-                _preflight_target(target, params.get("slide_index"), params.get("pptx_placement"), params.get("shape_index"))
+                _preflight_target(target, params.get("slide_index"), params.get("pptx_placement"), params.get("shape_index"), params.get("docx_insertion_mode"), params.get("insert_after_text"))
             image_path, mime = _generate(params)
             details = f"Visual saved: {image_path}\nFormat: {mime}"
             inserted = None
