@@ -21,7 +21,10 @@ from core.confirm import request as request_confirmation
 from core.path_policy import PathPolicyError, resolve_user_path, user_accessible_roots
 from actions._office_common import safe_filename, safe_output_directory, unique_output_path
 
-_AUTHORITY = "https://login.microsoftonline.com/consumers"
+_TENANT = os.environ.get("MARKLV_MICROSOFT_TENANT", "common").strip()
+if not re.fullmatch(r"[A-Za-z0-9.-]{1,128}", _TENANT):
+    _TENANT = "common"
+_AUTHORITY = "https://login.microsoftonline.com/" + _TENANT
 _DEVICE_ENDPOINT = _AUTHORITY + "/oauth2/v2.0/devicecode"
 _TOKEN_ENDPOINT = _AUTHORITY + "/oauth2/v2.0/token"
 _GRAPH = "https://graph.microsoft.com/v1.0"
@@ -52,6 +55,7 @@ _REQUIRED = {
     "calendar_update": {"Calendars.ReadWrite"},
     "calendar_delete": {"Calendars.ReadWrite"},
     "mail_list": {"Mail.ReadWrite"},
+    "mail_folders": {"Mail.ReadWrite"},
     "mail_search": {"Mail.ReadWrite"},
     "mail_read_message": {"Mail.ReadWrite"},
     "mail_mark_read": {"Mail.ReadWrite"},
@@ -664,7 +668,7 @@ def office_graph(parameters: dict, player=None, speak=None) -> str:
     if required is None:
         if operation in {"forms_create", "forms_edit"}:
             return "General Microsoft Forms creation/editing is not exposed by the supported public Microsoft Graph API; this action is intentionally unavailable."
-        return "Unsupported operation. Available: status, session_status, start_login, poll_login, logout, profile, calendar_list/create/update/delete, mail_list/search/read_message/mark_read/move/delete/reply/send, drive_list/search/create_folder/rename/move/delete/upload/upload_resume/download, onenote_list/sections/pages/create_page, forms_open."
+        return "Unsupported operation. Available: status, session_status, start_login, poll_login, logout, profile, calendar_list/create/update/delete, mail_list/folders/search/read_message/mark_read/move/delete/reply/send, drive_list/search/create_folder/rename/move/delete/upload/upload_resume/download, onenote_list/sections/pages/create_page, forms_open."
 
     try:
         token, error = _access_token(required)
@@ -716,6 +720,14 @@ def office_graph(parameters: dict, player=None, speak=None) -> str:
                 lambda: "Outlook event deleted." if _graph("DELETE", "/me/events/" + quote(event_id, safe=""), token) == {} else "Outlook event deleted.",
                 category="network", permissions=("network",),
             )
+
+        if operation == "mail_folders":
+            data = _graph("GET", "/me/mailFolders", token, params={"$top": "100", "$select": "id,displayName,parentFolderId,childFolderCount,totalItemCount,unreadItemCount"})
+            folders = data.get("value", [])
+            return "Outlook mail folders:\\n" + "\\n".join(
+                "- " + str(x.get("displayName") or "") + " | id=" + str(x.get("id") or "") + " | unread=" + str(x.get("unreadItemCount", 0))
+                for x in folders[:100]
+            ) if folders else "No Outlook mail folders returned."
 
         if operation == "mail_search":
             query = str(params.get("query", "")).strip()
@@ -1044,11 +1056,11 @@ def office_graph(parameters: dict, player=None, speak=None) -> str:
 
 TOOL = {
     "name": "office_graph",
-    "description": "Connect Mark-LV to a personal Microsoft account using OAuth device-code sign-in, then manage Outlook events and messages, organize OneDrive items, list/create OneNote pages, and open the supported Microsoft Forms web interface. Writes, deletes, moves, replies, uploads and event changes require explicit UI confirmation. Configure a public-client app ID first. Forms authoring is routed to forms.office.com because generic form creation is not available through the supported Graph API.",
+    "description": "Connect Mark-LV to a Microsoft account (personal or work/school, according to tenant configuration) using OAuth device-code sign-in, then manage Outlook events and messages, organize OneDrive items, list/create OneNote pages, and open the supported Microsoft Forms web interface. Writes, deletes, moves, replies, uploads and event changes require explicit UI confirmation. Configure a public-client app ID first. Forms authoring is routed to forms.office.com because generic form creation is not available through the supported Graph API.",
     "parameters": {
         "type": "OBJECT",
         "properties": {
-            "operation": {"type": "STRING", "description": "status | session_status | start_login | poll_login | logout | profile | calendar_list | calendar_create | calendar_update | calendar_delete | mail_list | mail_search | mail_read_message | mail_mark_read | mail_move | mail_delete | mail_reply | mail_send | drive_list | drive_search | drive_create_folder | drive_rename | drive_move | drive_delete | drive_upload | drive_upload_resume | drive_download | onenote_list | onenote_sections | onenote_pages | onenote_create_page | forms_open"},
+            "operation": {"type": "STRING", "description": "status | session_status | start_login | poll_login | logout | profile | calendar_list | calendar_create | calendar_update | calendar_delete | mail_list | mail_folders | mail_search | mail_read_message | mail_mark_read | mail_move | mail_delete | mail_reply | mail_send | drive_list | drive_search | drive_create_folder | drive_rename | drive_move | drive_delete | drive_upload | drive_upload_resume | drive_download | onenote_list | onenote_sections | onenote_pages | onenote_create_page | forms_open"},
             "scope_set": {"type": "STRING", "description": "For start_login: all | profile | calendar | mail_read | mail_send | drive | onenote; defaults to all"},
             "start": {"type": "STRING", "description": "ISO 8601 start datetime for calendar_list/calendar_create"},
             "end": {"type": "STRING", "description": "ISO 8601 end datetime for calendar_list/calendar_create/calendar_update"},
