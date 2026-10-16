@@ -5,6 +5,7 @@ import math
 import os
 import platform
 import random
+import re
 import subprocess
 import sys
 import threading
@@ -32,7 +33,7 @@ from PyQt6.QtCore import (
     QUrl, pyqtSignal,
 )
 from PyQt6.QtGui import (
-    QBrush, QColor, QConicalGradient, QDragEnterEvent, QDropEvent, QFont,
+    QBrush, QColor, QConicalGradient, QDesktopServices, QDragEnterEvent, QDropEvent, QFont,
     QFontDatabase, QKeySequence, QLinearGradient, QPainter, QPainterPath,
     QPen, QPixmap, QRadialGradient, QShortcut,
 )
@@ -50,7 +51,7 @@ except Exception as _e:            # noqa: BLE001 - reported, never fatal
     print(f"[Video] playback unavailable ({_e}) — the HUD will not show video.")
 
 from PyQt6.QtWidgets import (
-    QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
+    QApplication, QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
     QMainWindow, QPushButton, QScrollArea, QSizePolicy, QSplitter,
     QGraphicsScene, QGraphicsView,
     QStackedWidget, QTextEdit, QVBoxLayout, QWidget, QProgressBar,
@@ -2940,6 +2941,7 @@ class RemoteKeyOverlay(QWidget):
 
 
 class MainWindow(QMainWindow):
+    _office_login_result_sig = pyqtSignal(str, str)  # (operation, result)
     _log_sig        = pyqtSignal(str)
     _state_sig      = pyqtSignal(str)
     _content_sig    = pyqtSignal(str, str)   # (title, text) — thread-safe content display
@@ -3223,6 +3225,7 @@ class MainWindow(QMainWindow):
         self._metric_tmr.start(2000)
         self._update_metrics()
 
+        self._office_login_result_sig.connect(self._on_office_login_result)
         self._log_sig.connect(self._log.append_log)
         self._state_sig.connect(self._apply_state)
         self._content_sig.connect(self._show_content)
@@ -3930,6 +3933,124 @@ class MainWindow(QMainWindow):
             self._proc_lbl.setText("PROC  --")
 
 
+    def _open_office_login(self) -> None:
+        """Open a small, guided Microsoft device-code sign-in dialog."""
+        dialog = getattr(self, "_office_login_dialog", None)
+        if dialog is not None and dialog.isVisible():
+            dialog.raise_()
+            dialog.activateWindow()
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Connect Microsoft 365")
+        dialog.setModal(False)
+        dialog.setMinimumWidth(440)
+        dialog.setStyleSheet(f"background: {C.DARK}; color: {C.TEXT};")
+        lay = QVBoxLayout(dialog)
+        lay.setContentsMargins(18, 16, 18, 16)
+        lay.setSpacing(10)
+
+        title = QLabel("MICROSOFT ACCOUNT")
+        title.setFont(QFont("Courier New", 11, QFont.Weight.Bold))
+        title.setStyleSheet(f"color: {C.PRI}; background: transparent;")
+        lay.addWidget(title)
+
+        intro = QLabel("Connect your personal Microsoft account to use supported Outlook, Calendar, OneDrive and OneNote actions.")
+        intro.setWordWrap(True)
+        intro.setFont(QFont("Courier New", 8))
+        intro.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
+        lay.addWidget(intro)
+
+        self._office_login_status = QLabel("Starting secure sign-in…")
+        self._office_login_status.setWordWrap(True)
+        self._office_login_status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self._office_login_status.setFont(QFont("Courier New", 8))
+        self._office_login_status.setStyleSheet(f"color: {C.TEXT}; background: {C.PANEL2}; border: 1px solid {C.BORDER}; padding: 8px;")
+        lay.addWidget(self._office_login_status)
+
+        self._office_login_code = QLabel("Verification code: waiting…")
+        self._office_login_code.setWordWrap(True)
+        self._office_login_code.setFont(QFont("Courier New", 10, QFont.Weight.Bold))
+        self._office_login_code.setStyleSheet(f"color: {C.ACC2}; background: transparent;")
+        lay.addWidget(self._office_login_code)
+
+        row = QHBoxLayout()
+        self._office_login_open_btn = QPushButton("OPEN MICROSOFT LOGIN")
+        self._office_login_open_btn.setEnabled(False)
+        self._office_login_open_btn.setFixedHeight(32)
+        self._office_login_open_btn.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+        self._office_login_open_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._office_login_open_btn.setStyleSheet(self._BTN_PRI if hasattr(self, "_BTN_PRI") else f"color: {C.PRI}; border: 1px solid {C.PRI_DIM}; background: {C.PANEL2}; padding: 4px 8px;")
+        self._office_login_open_btn.clicked.connect(self._open_office_verification_url)
+        row.addWidget(self._office_login_open_btn)
+
+        self._office_login_check_btn = QPushButton("I HAVE SIGNED IN — CHECK")
+        self._office_login_check_btn.setEnabled(False)
+        self._office_login_check_btn.setFixedHeight(32)
+        self._office_login_check_btn.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+        self._office_login_check_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._office_login_check_btn.setStyleSheet(f"color: {C.TEXT_MED}; border: 1px solid {C.BORDER}; background: transparent; padding: 4px 8px;")
+        self._office_login_check_btn.clicked.connect(self._poll_office_login)
+        row.addWidget(self._office_login_check_btn)
+        lay.addLayout(row)
+
+        close_btn = QPushButton("CLOSE")
+        close_btn.setFixedHeight(28)
+        close_btn.setFont(QFont("Courier New", 8))
+        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        close_btn.setStyleSheet(f"color: {C.TEXT_DIM}; border: 1px solid {C.BORDER}; background: transparent; padding: 4px;")
+        close_btn.clicked.connect(dialog.close)
+        lay.addWidget(close_btn)
+        self._office_login_dialog = dialog
+        self._office_login_url = ""
+        dialog.show()
+        self._run_office_login_operation("start_login")
+
+    def _run_office_login_operation(self, operation: str) -> None:
+        """Run network sign-in work away from Qt's UI thread."""
+        if hasattr(self, "_office_login_status"):
+            self._office_login_status.setText("Starting secure sign-in…" if operation == "start_login" else "Checking Microsoft sign-in…")
+        self._office_login_check_btn.setEnabled(False)
+
+        def work():
+            try:
+                from actions.office_graph import office_graph
+                result = office_graph({"operation": operation})
+            except Exception as exc:
+                result = f"Microsoft sign-in failed: {type(exc).__name__}: {str(exc)[:500]}"
+            self._office_login_result_sig.emit(operation, str(result))
+
+        threading.Thread(target=work, daemon=True, name="microsoft-office-login").start()
+
+    def _open_office_verification_url(self) -> None:
+        if self._office_login_url:
+            QDesktopServices.openUrl(QUrl(self._office_login_url))
+
+    def _poll_office_login(self) -> None:
+        self._run_office_login_operation("poll_login")
+
+    def _on_office_login_result(self, operation: str, result: str) -> None:
+        """Render sign-in results on the Qt thread; never block the HUD on HTTP."""
+        if not hasattr(self, "_office_login_status"):
+            return
+        self._office_login_status.setText(result)
+        match = re.search(r"Open\s+(https?://\S+)\s+and enter code\s+([A-Z0-9-]+)", result, re.IGNORECASE)
+        if match:
+            self._office_login_url = match.group(1).rstrip(".,")
+            self._office_login_code.setText("Verification code:  " + match.group(2).rstrip("."))
+            self._office_login_open_btn.setEnabled(True)
+            self._office_login_check_btn.setEnabled(True)
+        elif operation == "poll_login":
+            pending = "still pending" in result.casefold() or "authorization_pending" in result.casefold()
+            connected = "account connected" in result.casefold() or "tokens were stored" in result.casefold()
+            self._office_login_check_btn.setEnabled(pending)
+            if connected:
+                self._office_login_code.setText("Microsoft account connected")
+                self._office_login_code.setStyleSheet(f"color: {C.GREEN}; background: transparent;")
+                self._office_login_open_btn.setEnabled(False)
+            elif not pending:
+                self._office_login_check_btn.setEnabled(True)
+
     def _build_header(self) -> QWidget:
         w = QWidget()
         w.setFixedHeight(54)
@@ -4237,6 +4358,15 @@ class MainWindow(QMainWindow):
         audio_btn.setStyleSheet(_BTN_STYLE_DIM)
         audio_btn.clicked.connect(self._open_audio_devices)
         lay.addWidget(audio_btn)
+
+        office_btn = QPushButton("▣  MICROSOFT 365 SIGN IN")
+        office_btn.setFixedHeight(30)
+        office_btn.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+        office_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        office_btn.setStyleSheet(_BTN_STYLE_PRI)
+        office_btn.setToolTip("Connect Outlook, Calendar, OneDrive and supported Microsoft services")
+        office_btn.clicked.connect(self._open_office_login)
+        lay.addWidget(office_btn)
 
         mem_btn = QPushButton("🧠  MEMORY")
         mem_btn.setFixedHeight(26)
