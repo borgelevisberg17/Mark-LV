@@ -81,25 +81,16 @@ def _build_sandbox() -> dict:
 
 
 def _execute_generated_code(code: str, player=None) -> str:
-    if not code or code.strip() == "UNSAFE":
-        return "This action cannot be performed safely."
+    """Fail closed: generated Python is not a security sandbox.
 
-    # Kod temizleme
-    if code.startswith("```"):
-        lines = code.split("\n")
-        code  = "\n".join(lines[1:-1]).strip()
-
-    sandbox      = _build_sandbox()
-    output_lines = []
-    sandbox["__builtins__"]["print"] = lambda *a: output_lines.append(" ".join(str(x) for x in a))
-
-    try:
-        exec(compile(code, "<jarvis_desktop>", "exec"), sandbox)
-        return "\n".join(output_lines) if output_lines else "Done."
-    except Exception as e:
-        print(f"[Desktop] Exec error: {e}\nCode:\n{code[:300]}")
-        return f"Execution error: {e}"
-
+    The former restricted globals still exposed powerful Python objects and ran
+    code with the application's user permissions. Do not execute model output
+    until a separately isolated worker with OS-enforced limits is implemented.
+    """
+    return (
+        "AI-generated desktop code is disabled for safety. "
+        "Use one of the supported explicit desktop actions instead."
+    )
 
 def _ask_gemini_for_desktop_action(task: str) -> str:
 
@@ -468,13 +459,11 @@ def desktop_control(
             if player:
                 player.write_log("[Desktop] Generating action...")
 
-            code = _ask_gemini_for_desktop_action(actual_task)
-            return _execute_generated_code(code, player=player)
+            return _execute_generated_code("", player=player)
 
         else:
             if action:
-                code = _ask_gemini_for_desktop_action(action)
-                return _execute_generated_code(code, player=player)
+                return _execute_generated_code("", player=player)
             return "No action or task specified."
 
     except Exception as e:
