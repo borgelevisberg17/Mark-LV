@@ -214,8 +214,51 @@ def _save_cache(cache: dict) -> None:
                     pass
 
 
+def _clear_cache() -> None:
+    """Remove the persisted Microsoft session from the OS credential vault."""
+    global _PENDING_FLOW
+    keyring = _keyring()
+    raw = keyring.get_password(_CREDENTIAL_SERVICE, _CREDENTIAL_USERNAME)
+    if raw:
+        try:
+            manifest = json.loads(raw)
+        except (ValueError, TypeError):
+            manifest = {}
+        if isinstance(manifest, dict) and manifest.get("_marklv_chunked") == 1:
+            generation = str(manifest.get("generation", ""))
+            try:
+                count = int(manifest.get("chunks", 0))
+            except (TypeError, ValueError, OverflowError):
+                count = 0
+            if generation and 0 < count <= _CREDENTIAL_MAX_CHUNKS:
+                for index in range(count):
+                    try:
+                        keyring.delete_password(
+                            _CREDENTIAL_SERVICE,
+                            f"{_CREDENTIAL_CHUNK_PREFIX}{generation}:{index}",
+                        )
+                    except Exception:
+                        pass
+    try:
+        keyring.delete_password(_CREDENTIAL_SERVICE, _CREDENTIAL_USERNAME)
+    except Exception as exc:
+        # A missing entry is already logged out; distinguish it from a vault error.
+        if raw:
+            raise RuntimeError(f"Could not remove the Microsoft session from the OS credential vault: {exc}") from exc
+    _PENDING_FLOW = None
+
+
 def _start_login(scope_set: str) -> str:
     global _PENDING_FLOW
+    # Never create a second OAuth flow for an account that is already connected.
+    try:
+        session = _account_status()
+        if session.get("connected"):
+            account = session.get("display_name") or session.get("email") or "Microsoft account"
+            return f"Already connected to {account}. Use operation=logout before connecting another account."
+    except Exception:
+        # A transient status check must not prevent the user from attempting sign-in.
+        pass
     client_id = _client_id()
     if not client_id:
         return (
@@ -335,6 +378,28 @@ def _access_token(required: set[str]) -> tuple[str | None, str]:
     cache["scope"] = payload.get("scope", cache.get("scope", ""))
     _save_cache(cache)
     return str(cache["access_token"]), ""
+
+
+def _account_status() -> dict:
+    """Validate the saved delegated session and resolve the Microsoft account identity."""
+    cache = _load_cache()
+    if not cache or not cache.get("refresh_token"):
+        return {"connected": False, "display_name": "", "email": "", "message": "No Microsoft account is connected."}
+    scopes = {str(scope).casefold() for scope in cache.get("scopes", [])}
+    if "user.read" not in scopes:
+        return {"connected": False, "display_name": "", "email": "", "message": "The saved session lacks User.Read permission. Sign in again with scope_set=all."}
+
+    token, error = _access_token({"User.Read"})
+    if not token:
+        return {"connected": False, "display_name": "", "email": "", "message": error}
+    profile = _graph("GET", "/me", token)
+    name = str(profile.get("displayName") or "Microsoft account").strip()
+    email = str(profile.get("mail") or profile.get("userPrincipalName") or "").strip()
+    cache["account_name"] = name
+    cache["account_email"] = email
+    cache["account_id"] = str(profile.get("id") or "")
+    _save_cache(cache)
+    return {"connected": True, "display_name": name, "email": email, "message": "Microsoft account connected."}
 
 
 def _graph(method: str, endpoint: str, token: str, *, params=None, json_body=None, data=None, headers=None):
@@ -551,6 +616,17 @@ def office_graph(parameters: dict, player=None, speak=None) -> str:
             )
         except Exception as exc:
             return f"Secure credential vault is unavailable: {exc}"
+    if operation == "session_status":
+        try:
+            return json.dumps(_account_status(), ensure_ascii=False, separators=(",", ":"))
+        except Exception as exc:
+            return json.dumps({"connected": None, "error": f"Could not verify the Microsoft session: {type(exc).__name__}: {str(exc)[:300]}"}, ensure_ascii=False)
+    if operation == "logout":
+        try:
+            _clear_cache()
+            return "Microsoft account disconnected. Saved Microsoft tokens were removed from the operating-system credential vault."
+        except Exception as exc:
+            return f"Microsoft logout failed: {type(exc).__name__}: {str(exc)[:400]}"
 
     required = _REQUIRED.get(operation)
     if required is None:
@@ -728,7 +804,7 @@ TOOL = {
     "parameters": {
         "type": "OBJECT",
         "properties": {
-            "operation": {"type": "STRING", "description": "status | start_login | poll_login | profile | calendar_list | calendar_create | mail_list | mail_send | drive_list | drive_upload | drive_upload_resume | drive_download | onenote_list | forms_create"},
+            "operation": {"type": "STRING", "description": "status | session_status | start_login | poll_login | logout | profile | calendar_list | calendar_create | mail_list | mail_send | drive_list | drive_upload | drive_upload_resume | drive_download | onenote_list | forms_create"},
             "scope_set": {"type": "STRING", "description": "For start_login: all | profile | calendar | mail_read | mail_send | drive | onenote; defaults to all"},
             "start": {"type": "STRING", "description": "ISO 8601 start datetime for calendar_list/calendar_create"},
             "end": {"type": "STRING", "description": "ISO 8601 end datetime for calendar_list/calendar_create"},
