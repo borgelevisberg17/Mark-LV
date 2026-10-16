@@ -18,6 +18,8 @@ import string
 import time
 from pathlib import Path
 
+from dashboard.security import LoginAttemptLimiter
+
 _DEPS_OK = False
 try:
     from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
@@ -466,6 +468,9 @@ class DashboardServer:
         self._wake_callback               = None
         self._connect_callback            = None
         self._pending_keys: dict[str, float] = {}
+        self._login_limiter = LoginAttemptLimiter(
+            max_attempts=8, window_seconds=60.0, block_seconds=120.0
+        )
         self._device_sessions: dict[str, dict] = {}  # device_token → {session_key}
         self._phone_audio_queue: asyncio.Queue    = asyncio.Queue(maxsize=200)
         self._uploads_dir                 = UPLOADS_DIR
@@ -538,6 +543,32 @@ class DashboardServer:
     def _build_app(self) -> "FastAPI":
         app = FastAPI(docs_url=None, redoc_url=None)
 
+        @app.middleware("http")
+        async def _security_headers(request: Request, call_next):
+            response = await call_next(request)
+            response.headers.setdefault("X-Content-Type-Options", "nosniff")
+            response.headers.setdefault("X-Frame-Options", "DENY")
+            response.headers.setdefault("Referrer-Policy", "no-referrer")
+            response.headers.setdefault(
+                "Permissions-Policy", "camera=(), geolocation=(), microphone=(self)"
+            )
+            response.headers.setdefault("Cache-Control", "no-store")
+            return response
+
+        def _client_identity(req: Request) -> str:
+            # Do not trust X-Forwarded-For: this server is not configured behind a
+            # trusted proxy, and clients must not be able to choose their own key.
+            return req.client.host if req.client else "unknown"
+
+        def _login_failure(identity: str, message: str, status_code: int = 401):
+            if self._login_limiter.record_failure(identity):
+                return JSONResponse(
+                    {"ok": False, "error": "Too many failed attempts. Try again later."},
+                    status_code=429,
+                    headers={"Retry-After": "120"},
+                )
+            return JSONResponse({"ok": False, "error": message}, status_code=status_code)
+
         def _auth(req: Request) -> bool:
             tok = req.headers.get("authorization", "").removeprefix("Bearer ").strip()
             return bool(tok) and tok in self._tokens
@@ -567,11 +598,24 @@ class DashboardServer:
 
         @app.post("/login")
         async def login(req: Request):
-            body    = await req.json()
+            identity = _client_identity(req)
+            if self._login_limiter.is_limited(identity):
+                return JSONResponse(
+                    {"ok": False, "error": "Too many failed attempts. Try again later."},
+                    status_code=429, headers={"Retry-After": "120"},
+                )
+            try:
+                body = await req.json()
+            except Exception:
+                return _login_failure(identity, "Invalid request body", 400)
+            if not isinstance(body, dict):
+                return _login_failure(identity, "Invalid request body", 400)
+
             entered = str(body.get("pin", "")).strip().upper()
-            now     = time.time()
+            now = time.time()
             if entered in self._pending_keys and self._pending_keys[entered] > now:
                 del self._pending_keys[entered]          # one-time use
+                self._login_limiter.record_success(identity)
                 tok = secrets.token_urlsafe(32)
                 self._tokens.add(tok)
                 self._token_keys[tok] = entered
@@ -583,14 +627,20 @@ class DashboardServer:
                 ))
                 # Bearer token in response body — no cookies needed (works on any browser/HTTP)
                 return JSONResponse({"ok": True, "token": tok})
-            return JSONResponse({"ok": False, "error": "Invalid or expired key"},
-                                status_code=401)
+            return _login_failure(identity, "Invalid or expired key")
 
         @app.get("/auto-login")
-        async def auto_login(key: str = ""):
+        async def auto_login(req: Request, key: str = ""):
             """QR code target — validates one-time key, creates session, redirects phone."""
+            identity = _client_identity(req)
+            if self._login_limiter.is_limited(identity):
+                return HTMLResponse(
+                    "<!doctype html><title>Try later</title><p>Too many attempts. Try again later.</p>",
+                    status_code=429, headers={"Retry-After": "120"},
+                )
             now = time.time()
             if not key or key not in self._pending_keys or self._pending_keys[key] <= now:
+                _login_failure(identity, "Invalid or expired key")
                 return HTMLResponse("""<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width">
 <style>
@@ -602,6 +652,7 @@ class DashboardServer:
 <p>Press <strong style="color:#dde3ed">Remote Control</strong> in JARVIS to get a new QR code.</p>
 </div></body></html>""")
 
+            self._login_limiter.record_success(identity)
             del self._pending_keys[key]
             tok     = secrets.token_urlsafe(32)
             dev_tok = secrets.token_urlsafe(32)
@@ -636,13 +687,22 @@ class DashboardServer:
         @app.post("/api/device-login")
         async def device_login_ep(req: Request):
             """Return a fresh auth token for a previously paired device token."""
+            identity = _client_identity(req)
+            if self._login_limiter.is_limited(identity):
+                return JSONResponse(
+                    {"ok": False, "error": "Too many failed attempts. Try again later."},
+                    status_code=429, headers={"Retry-After": "120"},
+                )
             try:
                 body = await req.json()
             except Exception:
-                return JSONResponse({"ok": False}, status_code=400)
-            dev_tok = (body.get("device_token") or "").strip()
+                return _login_failure(identity, "Invalid request body", 400)
+            if not isinstance(body, dict):
+                return _login_failure(identity, "Invalid request body", 400)
+            dev_tok = str(body.get("device_token") or "").strip()
             if not dev_tok or dev_tok not in self._device_sessions:
-                return JSONResponse({"ok": False}, status_code=401)
+                return _login_failure(identity, "Invalid device token")
+            self._login_limiter.record_success(identity)
             session_key = self._device_sessions[dev_tok]["session_key"]
             tok = secrets.token_urlsafe(32)
             self._tokens.add(tok)
