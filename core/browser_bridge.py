@@ -104,7 +104,12 @@ class BrowserBridge:
                 if not self._authorized():
                     self._json(401, {"error": "unauthorized"})
                     return
-                if urlparse(self.path).path != "/result":
+                route = urlparse(self.path).path
+                if route == "/heartbeat":
+                    bridge.heartbeat()
+                    self._json(200, {"ok": True})
+                    return
+                if route != "/result":
                     self._json(404, {"error": "not_found"})
                     return
                 try:
@@ -146,7 +151,7 @@ class BrowserBridge:
         with self._lock:
             self._prune()
             return bool(getattr(self, "_last_heartbeat", 0) and
-                        time.monotonic() - self._last_heartbeat < 12)
+                        time.monotonic() - self._last_heartbeat < 35)
 
     def submit(self, action: str, parameters: dict[str, Any], timeout: float = 25) -> str | None:
         if action not in _ALLOWED_ACTIONS or not self.connected():
