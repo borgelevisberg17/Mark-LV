@@ -2,12 +2,17 @@
 
 Run with: pip install python-docx openpyxl python-pptx Pillow reportlab
 """
+import importlib.util
 import tempfile
 import unittest
 import zipfile
 from pathlib import Path
 
 
+@unittest.skipUnless(
+    all(importlib.util.find_spec(name) for name in ("docx", "openpyxl", "pptx", "PIL", "reportlab")),
+    "Office artifact dependencies are not installed in this test environment",
+)
 class OfficeArtifactIntegrationTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
