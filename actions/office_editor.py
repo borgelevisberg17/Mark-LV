@@ -137,11 +137,14 @@ def _docx_edit(params: dict) -> str:
 
     elif operation == "add_toc":
         heading = str(params.get("heading", "Índice")).strip() or "Índice"
-        doc.add_heading(heading, level=1)
-        paragraph = doc.add_paragraph()
+        anchor = doc.paragraphs[0] if doc.paragraphs else doc.add_paragraph()
+        heading_paragraph = anchor.insert_paragraph_before(heading)
+        heading_paragraph.style = "Heading 1"
+        paragraph = anchor.insert_paragraph_before()
         begin_run = OxmlElement("w:r")
         begin = OxmlElement("w:fldChar")
         begin.set(qn("w:fldCharType"), "begin")
+        begin.set(qn("w:dirty"), "true")
         begin_run.append(begin)
         instruction_run = OxmlElement("w:r")
         instruction = OxmlElement("w:instrText")
