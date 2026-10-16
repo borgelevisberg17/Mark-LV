@@ -1,4 +1,4 @@
-"""Static regression tests for high-risk action execution paths."""
+"""Regression tests for consent-aware action execution and path safety."""
 import ast
 import unittest
 from pathlib import Path
@@ -23,6 +23,7 @@ class ActionExecutionSecurityTests(unittest.TestCase):
             "actions/open_app.py",
             "actions/computer_settings.py",
             "actions/dev_agent.py",
+            "core/execution.py",
         ):
             with self.subTest(path=relative):
                 tree = ast.parse(_read(relative), filename=relative)
@@ -37,44 +38,89 @@ class ActionExecutionSecurityTests(unittest.TestCase):
                             f"{relative} contains shell=True",
                         )
 
-    def test_desktop_generated_code_is_not_executed(self):
-        tree = ast.parse(_read("actions/desktop.py"), filename="actions/desktop.py")
+    def test_desktop_generated_code_uses_human_confirmation_and_runner(self):
+        source = _read("actions/desktop.py")
+        tree = ast.parse(source, filename="actions/desktop.py")
         node = _function(tree, "_execute_generated_code")
-        forbidden = {"exec", "eval", "compile"}
-        for child in ast.walk(node):
-            if isinstance(child, ast.Call):
-                name = child.func.id if isinstance(child.func, ast.Name) else ""
-                self.assertNotIn(name, forbidden)
+        calls = {
+            child.func.id if isinstance(child.func, ast.Name)
+            else child.func.attr if isinstance(child.func, ast.Attribute)
+            else ""
+            for child in ast.walk(node) if isinstance(child, ast.Call)
+        }
+        self.assertIn("request_execution", calls)
+        self.assertIn("run_python_code", calls)
+        self.assertIn("_ask_gemini_for_desktop_action(actual_task)", source)
 
-    def test_file_processor_run_branch_does_not_launch_python(self):
-        tree = ast.parse(_read("actions/file_processor.py"), filename="actions/file_processor.py")
+    def test_file_processor_run_uses_confirmation_and_shared_runner(self):
+        source = _read("actions/file_processor.py")
+        tree = ast.parse(source, filename="actions/file_processor.py")
         node = _function(tree, "_process_code")
-        for child in ast.walk(node):
-            if isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute):
-                self.assertFalse(
-                    child.func.attr in {"Popen", "run", "call", "check_call", "check_output"}
-                    and isinstance(child.func.value, ast.Name)
-                    and child.func.value.id == "subprocess",
-                    "Code-processing function should not invoke subprocess directly",
-                )
+        calls = {
+            child.func.id if isinstance(child.func, ast.Name)
+            else child.func.attr if isinstance(child.func, ast.Attribute)
+            else ""
+            for child in ast.walk(node) if isinstance(child, ast.Call)
+        }
+        self.assertIn("request_execution", calls)
+        self.assertIn("run_python_file", calls)
+        self.assertNotIn("subprocess", calls)
 
+    def test_dev_agent_execution_and_recovery_use_central_engine(self):
+        source = _read("actions/dev_agent.py")
+        tree = ast.parse(source, filename="actions/dev_agent.py")
+        build = _function(tree, "_build_project")
+        workflow = _function(tree, "_execute_project_workflow")
+        self.assertTrue(any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "request_execution"
+            for node in ast.walk(build)
+        ))
+        workflow_calls = {
+            node.func.id if isinstance(node.func, ast.Name)
+            else node.func.attr if isinstance(node.func, ast.Attribute)
+            else ""
+            for node in ast.walk(workflow) if isinstance(node, ast.Call)
+        }
+        self.assertIn("_install_dependencies", workflow_calls)
+        self.assertIn("_run_project", workflow_calls)
+        self.assertIn("_try_auto_install", workflow_calls)
+        self.assertIn("run_project_command", source)
+        self.assertIn("install_dependencies", source)
 
+    def test_execution_engine_enforces_limits_and_avoids_shell(self):
+        source = _read("core/execution.py")
+        tree = ast.parse(source, filename="core/execution.py")
+        self.assertIn("MAX_TIMEOUT_SECONDS = 300", source)
+        self.assertIn("MAX_OUTPUT_CHARS = 12_000", source)
+        self.assertIn("shell=False", source)
+        self.assertIn("resolve_user_path", source)
+        self.assertIn("confirm.request", source)
 
-    def test_dev_agent_does_not_run_unisolated_project_commands(self):
-        tree = ast.parse(_read("actions/dev_agent.py"), filename="actions/dev_agent.py")
-        for function_name in ("_install_dependencies", "_run_project", "_try_auto_install"):
-            with self.subTest(function=function_name):
-                node = _function(tree, function_name)
-                for child in ast.walk(node):
-                    if not isinstance(child, ast.Call):
-                        continue
-                    if isinstance(child.func, ast.Attribute):
-                        self.assertFalse(
-                            isinstance(child.func.value, ast.Name)
-                            and child.func.value.id == "subprocess"
-                            and child.func.attr in {"run", "Popen", "call", "check_call", "check_output"},
-                            f"{function_name} must not spawn unisolated processes",
-                        )
+    def test_prompt_requires_ui_consent_without_disabling_normal_work(self):
+        prompt = _read("core/prompt.txt")
+        self.assertIn("Do not disable a supported operation merely because the code was generated by AI.", prompt)
+        self.assertIn("The UI confirmation is the authority", prompt)
+        self.assertIn("do not add unnecessary confirmation prompts", prompt)
+
+    def test_execution_engine_validates_timeouts_and_command_parsing(self):
+        from core.execution import ExecutionPolicyError, _validate_timeout, parse_command
+
+        self.assertEqual(_validate_timeout(30), 30)
+        for invalid in (0, -1, 301, "not-a-number"):
+            with self.subTest(timeout=invalid):
+                with self.assertRaises(ExecutionPolicyError):
+                    _validate_timeout(invalid)
+        self.assertEqual(parse_command("python main.py"), ["python", "main.py"])
+        with self.assertRaises(ExecutionPolicyError):
+            parse_command("")
+
+    def test_generated_python_runs_in_timed_child_process(self):
+        from core.execution import run_python_code
+
+        result = run_python_code("print('execution-engine-ok')", timeout=10)
+        self.assertIn("execution-engine-ok", result)
 
     def test_file_actions_use_shared_path_policy(self):
         controller = _read("actions/file_controller.py")
@@ -84,6 +130,7 @@ class ActionExecutionSecurityTests(unittest.TestCase):
         self.assertIn("from core.path_policy import", processor)
         self.assertIn("_safe_extract_archive", processor)
         self.assertNotIn("shutil.unpack_archive(path, dest)", processor)
+
 
 if __name__ == "__main__":
     unittest.main()

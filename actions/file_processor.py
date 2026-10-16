@@ -468,14 +468,25 @@ def _process_code(path: Path, action: str, params: dict, speak=None) -> str:
     ext     = path.suffix.lstrip(".")
 
     if action == "run":
-        # A timeout is not a sandbox: arbitrary Python can still access the
-        # user's files, credentials, network and operating-system APIs.
-        return (
-            "Direct code execution is disabled for safety. "
-            "The file can be reviewed or explained, but execution requires "
-            "a dedicated isolated runner with restricted filesystem/network "
-            "access and resource limits."
-        )
+        if path.suffix.lower() != ".py":
+            return "The run action currently supports Python (.py) files only."
+        from core.execution import ExecutionPolicyError, request_execution, run_python_file
+
+        try:
+            return request_execution(
+                key="file-processor-python-run",
+                title=f"Run Python file: {path.name}",
+                detail=(
+                    f"The assistant wants to execute {path} with the current Python interpreter. "
+                    "The script will run with your current user's permissions and may access "
+                    "files, applications, and network resources available to your account. "
+                    "Execution is limited to 60 seconds."
+                ),
+                operation=lambda: run_python_file(path, timeout=60),
+                player=params.get("_player"),
+            )
+        except (ExecutionPolicyError, OSError, ValueError) as exc:
+            return f"Could not prepare Python execution: {exc}"
 
     if action == "info":
         lines = content.count("\n")
@@ -896,7 +907,7 @@ def file_processor(parameters: dict, player=None, speak=None) -> str:
     file_type   = _detect_type(path)
     action      = (parameters.get("action") or "").lower().strip()
     instruction = parameters.get("instruction", "")
-    params      = {**parameters, "instruction": instruction}
+    params      = {**parameters, "instruction": instruction, "_player": player}
 
     log_msg = f"[FileProcessor] {file_type.upper()} | {path.name} | action={action or 'auto'}"
     print(log_msg)
