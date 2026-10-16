@@ -18,7 +18,7 @@ import string
 import time
 from pathlib import Path
 
-from dashboard.security import LoginAttemptLimiter, SessionTokenRegistry
+from dashboard.security import LoginAttemptLimiter, SessionTokenRegistry, websocket_origin_matches_host
 
 _DEPS_OK = False
 try:
@@ -464,6 +464,7 @@ class DashboardServer:
         self._token_sessions = SessionTokenRegistry(ttl_seconds=8 * 60 * 60)
         self._aes_cache:  dict[str, bytes]= {}   # session_key → AES bytes
         self._clients: set[WebSocket]     = set()
+        self._client_tokens: dict[WebSocket, str] = {}
         self._history: list[dict]         = []
         self._command_queue               = asyncio.Queue()
         self._wake_callback               = None
@@ -557,11 +558,20 @@ class DashboardServer:
             self._history = self._history[-300:]
         dead: set[WebSocket] = set()
         for ws in list(self._clients):
+            if not self._valid_token(self._client_tokens.get(ws, "")):
+                try:
+                    await ws.close(code=4001)
+                except Exception:
+                    pass
+                dead.add(ws)
+                continue
             try:
                 await ws.send_json(msg)
             except Exception:
                 dead.add(ws)
         self._clients -= dead
+        for ws in dead:
+            self._client_tokens.pop(ws, None)
 
     # ── FastAPI app ───────────────────────────────────────────────────────
 
@@ -601,16 +611,9 @@ class DashboardServer:
         def _origin_allowed(websocket: WebSocket) -> bool:
             # Browser WebSockets carry Origin. Require an exact host match to
             # prevent a hostile website from reusing a logged-in browser token.
-            origin = websocket.headers.get("origin", "").strip()
-            host = websocket.headers.get("host", "").strip()
-            if not origin or not host:
-                return False
-            from urllib.parse import urlsplit
-            try:
-                parsed = urlsplit(origin)
-            except ValueError:
-                return False
-            return parsed.scheme in ("http", "https") and parsed.netloc.casefold() == host.casefold()
+            return websocket_origin_matches_host(
+                websocket.headers.get("origin", ""), websocket.headers.get("host", "")
+            )
 
         # serve CryptoJS from local cache, fallback to CDN redirect
         @app.get("/static/crypto.js")
@@ -808,7 +811,16 @@ class DashboardServer:
             ))
             try:
                 while True:
-                    data = await websocket.receive_bytes()
+                    try:
+                        data = await asyncio.wait_for(websocket.receive_bytes(), timeout=30.0)
+                    except asyncio.TimeoutError:
+                        if not self._valid_token(tok):
+                            await websocket.close(code=4001)
+                            break
+                        continue
+                    if not self._valid_token(tok):
+                        await websocket.close(code=4001)
+                        break
                     try:
                         self._phone_audio_queue.put_nowait(
                             {"data": data, "mime_type": "audio/pcm"}
@@ -921,6 +933,7 @@ class DashboardServer:
                 return
             await websocket.accept()
             self._clients.add(websocket)
+            self._client_tokens[websocket] = tok
             for entry in self._history[-50:]:
                 try:
                     await websocket.send_json(entry)
@@ -928,7 +941,16 @@ class DashboardServer:
                     break
             try:
                 while True:
-                    data = await websocket.receive_json()
+                    try:
+                        data = await asyncio.wait_for(websocket.receive_json(), timeout=30.0)
+                    except asyncio.TimeoutError:
+                        if not self._valid_token(tok):
+                            await websocket.close(code=4001)
+                            break
+                        continue
+                    if not self._valid_token(tok):
+                        await websocket.close(code=4001)
+                        break
                     if data.get("type") == "command":
                         enc = data.get("enc", "")
                         t   = self._decrypt(tok, enc) if enc else (data.get("text") or "").strip()
@@ -940,6 +962,7 @@ class DashboardServer:
                 pass
             finally:
                 self._clients.discard(websocket)
+                self._client_tokens.pop(websocket, None)
 
         return app
 
