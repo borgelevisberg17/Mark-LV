@@ -131,6 +131,24 @@
       pointer-events:none; white-space:nowrap;
     }
     #toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
+  
+    #visual-preview[hidden]{display:none!important}
+    #visual-preview{position:fixed;inset:0;z-index:1000;display:flex;align-items:center;justify-content:center;padding:clamp(12px,3vw,36px);background:rgba(2,4,10,.86);backdrop-filter:blur(18px);animation:visualFadeIn .18s ease-out}
+    @keyframes visualFadeIn{from{opacity:0}to{opacity:1}}
+    .visual-shell{width:min(1280px,100%);height:min(900px,100%);min-height:0;display:flex;flex-direction:column;overflow:hidden;background:#0b0e16;border:1px solid rgba(255,255,255,.13);border-radius:20px;box-shadow:0 28px 100px rgba(0,0,0,.65)}
+    .visual-topbar{display:flex;align-items:center;gap:14px;padding:15px 18px;flex-shrink:0;border-bottom:1px solid rgba(255,255,255,.09);background:rgba(255,255,255,.025)}
+    .visual-mark{width:36px;height:36px;display:grid;place-items:center;border-radius:11px;background:rgba(99,102,241,.16);color:#a5b4fc;font-size:18px}
+    .visual-heading{min-width:0;flex:1}.visual-heading strong{display:block;font-size:14px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.visual-heading span{display:block;margin-top:4px;color:#8994a9;font-size:11px;overflow-wrap:anywhere}
+    .visual-close{width:38px;height:38px;flex-shrink:0;display:grid;place-items:center;border-radius:12px;border:1px solid rgba(255,255,255,.13);background:rgba(255,255,255,.045);color:#e5e7eb;font-size:25px;line-height:1;cursor:pointer;transition:background .15s,border-color .15s,transform .15s}
+    .visual-close:hover{background:rgba(248,113,113,.16);border-color:rgba(248,113,113,.4);transform:scale(1.04)}
+    .visual-stage{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;overflow:auto;padding:clamp(10px,2.5vw,28px);background:radial-gradient(ellipse at 50% 40%,rgba(72,82,116,.16),transparent 60%),linear-gradient(135deg,#0a0c12,#111521 50%,#090b11)}
+    .visual-image{display:block;max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain;border-radius:4px;box-shadow:0 16px 55px rgba(0,0,0,.42)}
+    .visual-footer{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:12px 18px;flex-shrink:0;border-top:1px solid rgba(255,255,255,.08);color:#98a2b3;font-size:11px;background:rgba(255,255,255,.018)}
+    .visual-footer .visual-path{flex:1;min-width:180px;overflow-wrap:anywhere;color:#c5cbd6}
+    .visual-copy{border:1px solid rgba(129,140,248,.28);border-radius:9px;padding:8px 11px;background:rgba(99,102,241,.1);color:#c7d2fe;font:inherit;cursor:pointer}
+    .visual-copy:hover{background:rgba(99,102,241,.2)}
+    @media(max-width:640px){#visual-preview{padding:0}.visual-shell{height:100%;width:100%;border-radius:0;border:0}.visual-topbar{padding:12px}.visual-stage{padding:8px}.visual-footer{padding:10px 12px}}
+
   </style>
 </head>
 <body>
@@ -142,6 +160,19 @@
     <div class="spacer"></div>
     <div class="url">__IP__:__PORT__</div>
   </header>
+  
+  <section id="visual-preview" hidden role="dialog" aria-modal="true" aria-labelledby="visual-preview-title" aria-describedby="visual-preview-meta">
+    <div class="visual-shell">
+      <div class="visual-topbar">
+        <div class="visual-mark" aria-hidden="true">✦</div>
+        <div class="visual-heading"><strong id="visual-preview-title">Visual Studio</strong><span id="visual-preview-meta">AI-generated visual preview</span></div>
+        <button id="visual-preview-close" class="visual-close" type="button" aria-label="Close visual preview" title="Close preview (Esc)">×</button>
+      </div>
+      <div class="visual-stage"><img id="visual-preview-image" class="visual-image" alt="Generated visual preview"></div>
+      <div class="visual-footer"><span id="visual-preview-path" class="visual-path"></span><button id="visual-preview-copy" class="visual-copy" type="button">Copy file path</button></div>
+    </div>
+  </section>
+
   <main id="feed"></main>
   <footer>
     <input id="inp" placeholder="Send a command to JARVIS…" autocomplete="off">
@@ -220,7 +251,42 @@
       if (m.type === 'wake')          sys('Wake word detected — connecting…');
       if (m.type === 'sys')           sys(m.text);
       if (m.type === 'file_received') _onFileReceived(m);
+      if (m.type === 'visual_preview') openVisualPreview(m);
     };
+
+
+    let _visualPreviewPath = "";
+    const _visualPreview = document.getElementById('visual-preview');
+    const _visualPreviewClose = document.getElementById('visual-preview-close');
+    function closeVisualPreview() {
+      if (!_visualPreview || _visualPreview.hidden) return;
+      _visualPreview.hidden = true;
+      document.getElementById('visual-preview-image').removeAttribute('src');
+      document.body.style.overflow = '';
+      _visualPreviewPath = '';
+    }
+    function openVisualPreview(m) {
+      if (!m || typeof m.data_url !== 'string' ||
+          !(m.data_url.startsWith('data:image/png;base64,') || m.data_url.startsWith('data:image/jpeg;base64,') || m.data_url.startsWith('data:image/webp;base64,'))) return;
+      const image = document.getElementById('visual-preview-image');
+      image.src = m.data_url;
+      image.alt = (m.title || m.filename || 'Generated visual') + ' — preview';
+      document.getElementById('visual-preview-title').textContent = m.title || 'Visual Studio';
+      document.getElementById('visual-preview-meta').textContent = [m.filename,m.mime_type,m.inserted_path ? 'Inserted into a new Office copy' : 'Ready to use'].filter(Boolean).join(' · ');
+      _visualPreviewPath = typeof m.file_path === 'string' ? m.file_path : '';
+      document.getElementById('visual-preview-path').textContent = _visualPreviewPath || 'Saved visual asset';
+      _visualPreview.hidden = false;
+      document.body.style.overflow = 'hidden';
+      _visualPreviewClose.focus();
+    }
+    _visualPreviewClose?.addEventListener('click', closeVisualPreview);
+    _visualPreview?.addEventListener('click', event => { if (event.target === _visualPreview) closeVisualPreview(); });
+    document.addEventListener('keydown', event => { if (event.key === 'Escape') closeVisualPreview(); });
+    document.getElementById('visual-preview-copy')?.addEventListener('click', async () => {
+      if (!_visualPreviewPath) return;
+      try { await navigator.clipboard.writeText(_visualPreviewPath); toast('File path copied'); }
+      catch (_) { toast('Clipboard access unavailable'); }
+    });
 
     function setStatus(s) {
       if (s === 'active') {

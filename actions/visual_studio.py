@@ -1,7 +1,10 @@
 """Generate/edit visual assets with Gemini and optionally insert them into Office files."""
 from __future__ import annotations
 
+import asyncio
+import base64
 import json
+import mimetypes
 import os
 import sys
 import uuid
@@ -349,7 +352,37 @@ def _insert_pptx(image_path: Path, raw_target: str, slide_index=None, caption: s
     return output
 
 
-def visual_studio(parameters: dict, player=None, speak=None) -> str:
+
+_PREVIEW_MAX_BYTES = 4 * 1024 * 1024
+
+def _publish_preview(image_path: Path, params: dict, dashboard=None, event_loop=None, inserted_path: Path | None = None) -> bool:
+    """Send a bounded image preview to authenticated dashboard WebSocket clients."""
+    if dashboard is None or event_loop is None:
+        return False
+    try:
+        image_path = resolve_user_path(image_path, roots=user_accessible_roots(), must_exist=True)
+        if not image_path.is_file() or image_path.stat().st_size > _PREVIEW_MAX_BYTES:
+            return False
+        mime = mimetypes.guess_type(image_path.name)[0] or ""
+        if mime not in {"image/png", "image/jpeg", "image/webp"}:
+            return False
+        payload = {
+            "type": "visual_preview",
+            "title": str(params.get("preview_title", "") or params.get("cover_title", "") or image_path.stem)[:120],
+            "filename": image_path.name,
+            "mime_type": mime,
+            "data_url": f"data:{mime};base64,{base64.b64encode(image_path.read_bytes()).decode('ascii')}",
+            "file_path": str(image_path),
+            "inserted_path": str(inserted_path) if inserted_path else "",
+        }
+        future = asyncio.run_coroutine_threadsafe(dashboard.broadcast(payload), event_loop)
+        future.result(timeout=4)
+        return True
+    except Exception:
+        # Preview delivery is best-effort; never discard a saved image because a client disconnected.
+        return False
+
+def visual_studio(parameters: dict, player=None, speak=None, dashboard=None, event_loop=None) -> str:
     params = parameters or {}
     operation = str(params.get("operation", "generate") or "generate").strip().lower()
     try:
@@ -359,6 +392,7 @@ def visual_studio(parameters: dict, player=None, speak=None) -> str:
                 _preflight_target(target, params.get("slide_index"))
             image_path, mime = _generate(params)
             details = f"Visual saved: {image_path}\nFormat: {mime}"
+            inserted = None
             target = str(params.get("target_file_path", "") or "").strip()
             if target:
                 target_path = _preflight_target(target, params.get("slide_index"))
@@ -369,6 +403,10 @@ def visual_studio(parameters: dict, player=None, speak=None) -> str:
                 else:
                     inserted = _insert_pptx(image_path, target, params.get("slide_index"), caption)
                 details += f"\nInserted into a new copy: {inserted}"
+            if _publish_preview(image_path, params, dashboard, event_loop, inserted):
+                details += "\nPreview opened in the Mark-LV dashboard. Close it with the × button when finished."
+            elif image_path.stat().st_size > _PREVIEW_MAX_BYTES:
+                details += "\nThe image was saved, but live preview was skipped because it exceeds the 4 MiB preview limit."
             return details
         if operation == "insert":
             image_path = _image_path(str(params.get("image_path", "") or ""))
@@ -382,7 +420,11 @@ def visual_studio(parameters: dict, player=None, speak=None) -> str:
                 inserted = _insert_docx(image_path, target, mode, caption)
             else:
                 inserted = _insert_pptx(image_path, target, params.get("slide_index"), caption)
-            return f"Image inserted into a new copy: {inserted}\nSource image and original document/presentation were preserved."
+            previewed = _publish_preview(image_path, params, dashboard, event_loop, inserted)
+            result = f"Image inserted into a new copy: {inserted}\nSource image and original document/presentation were preserved."
+            if previewed:
+                result += "\nPreview opened in the Mark-LV dashboard."
+            return result
         return "Unsupported operation. Use generate, edit, or insert."
     except ImportError as exc:
         return f"Visual Studio dependency unavailable: {exc}. Check google-genai and Pillow installation."

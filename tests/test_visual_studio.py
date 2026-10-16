@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from actions.visual_studio import _compose_cover_text, _extract_image, _insert_docx, _insert_pptx, visual_studio
+from actions.visual_studio import _compose_cover_text, _extract_image, _insert_docx, _insert_pptx, _publish_preview, visual_studio
 
 
 class VisualStudioUnitTests(unittest.TestCase):
@@ -27,6 +27,9 @@ class VisualStudioUnitTests(unittest.TestCase):
 
     def test_invalid_operation_is_rejected_without_network(self):
         self.assertIn("Unsupported operation", visual_studio({"operation": "delete"}))
+
+    def test_preview_is_not_attempted_without_dashboard_context(self):
+        self.assertFalse(_publish_preview(Path("missing.png"), {}, dashboard=None, event_loop=None))
 
     @unittest.skipUnless(importlib.util.find_spec("PIL"), "Pillow is not installed")
     def test_cover_typography_creates_separate_valid_asset(self):
