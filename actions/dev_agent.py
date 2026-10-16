@@ -477,62 +477,6 @@ def _build_project(
         "before running them manually."
     )
 
-    last_output   = ""
-    auto_installs = 0
-
-    for attempt in range(1, MAX_FIX_ATTEMPTS + 1):
-        log(f"Running project (attempt {attempt}/{MAX_FIX_ATTEMPTS})...")
-        last_output = _run_project(run_command, project_dir, timeout)
-        log(f"Output preview: {last_output[:150]}")
-
-        if not _has_error(last_output, run_command):
-            msg = (
-                f"Project '{proj_name}' is working, sir. "
-                f"Built in {attempt} attempt{'s' if attempt > 1 else ''}. "
-                f"Saved to: {project_dir}"
-            )
-            if speak: speak(msg)
-            return f"{msg}\n\nOutput:\n{last_output}"
-
-        if attempt == MAX_FIX_ATTEMPTS:
-            break
-
-        error_type = _classify_error(last_output)
-        if error_type == "dependency_error" and auto_installs < 3:
-            installed = _try_auto_install(last_output, project_dir)
-            if installed:
-                auto_installs += 1
-                log("Missing dependency installed, retrying...")
-                time.sleep(1)
-                continue
-
-        log(f"Fixing errors (type: {error_type})...")
-        try:
-            updated = _fix_files(
-                error_output=last_output,
-                project_description=description,
-                all_files=files,
-                file_codes=file_codes,
-                language=language,
-                project_dir=project_dir,
-                entry_point=entry_point,
-            )
-            file_codes.update(updated)
-            time.sleep(1)
-        except RateLimitError:
-            msg = "Rate limit reached during fix. Project saved, check it manually in VSCode."
-            if speak: speak(msg)
-            return msg
-        except Exception as e:
-            log(f"Fix step failed: {e}")
-
-    msg = (
-        f"I couldn't fully fix '{proj_name}' after {MAX_FIX_ATTEMPTS} attempts, sir. "
-        f"Project is saved at {project_dir} — open it in VSCode and check manually."
-    )
-    if speak: speak(msg)
-    return f"{msg}\n\nLast error:\n{last_output[:600]}"
-
 
 def dev_agent(
     parameters: dict,
