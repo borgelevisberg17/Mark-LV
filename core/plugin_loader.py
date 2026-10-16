@@ -49,6 +49,8 @@ class PluginRecord:
     settings: Optional[dict] = None   # optional PLUGIN_SETTINGS schema (config fields)
     behavior: Optional[str] = None    # None = the API's default (blocking)
     scheduling: Optional[str] = None  # None = the API's default (WHEN_IDLE)
+    permissions: tuple[str, ...] = ()
+    trusted: bool = False
 
 
 class PluginRegistry:
