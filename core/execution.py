@@ -261,4 +261,4 @@ def install_dependencies(dependencies: Sequence[str], project_dir: str | Path,
         if not npm:
             raise ExecutionPolicyError("npm is not installed or is not available on PATH.")
         argv = [npm, "install", *packages]
-    return _run_process(argv, cwd, _validate_timeout(timeout or 180))
+    return _run_process(argv, cwd, _validate_timeout(180 if timeout is None else timeout, 'dependency_install'))
