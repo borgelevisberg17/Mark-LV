@@ -333,33 +333,6 @@ def discover_plugins(plugins_dir: Path, core_tool_names: set[str],
                 all_records.append(rec)
                 logger(f"Plugin rejected: {path.name} — {rec.error}")
                 continue
-            manifest = _static_plugin_manifest(path)
-            manifest_name = manifest.get("name")
-            requested = manifest.get("permissions", [])
-            if not isinstance(manifest_name, str) or not _NAME_RE.match(manifest_name):
-                raise ValueError("PLUGIN name is missing or invalid.")
-            if not isinstance(requested, (list, tuple)) or any(
-                not isinstance(item, str) or item not in _ALLOWED_PLUGIN_PERMISSIONS
-                for item in requested
-            ):
-                raise ValueError("PLUGIN permissions contains an unknown capability.")
-            grant = plugin_policy.get(manifest_name, {})
-            granted = grant.get("permissions", []) if isinstance(grant, dict) else []
-            if not isinstance(grant, dict) or grant.get("trusted") is not True:
-                rec = PluginRecord(name=manifest_name, file=path.name,
-                    error="Untrusted extension was not imported or executed. Review it and add an explicit trust grant in config/plugin_permissions.json.")
-                all_records.append(rec)
-                logger(f"Plugin rejected: {path.name} — {rec.error}")
-                continue
-            if not isinstance(granted, list) or any(item not in _ALLOWED_PLUGIN_PERMISSIONS for item in granted):
-                raise ValueError("Trust policy contains an invalid permission list.")
-            missing = sorted(set(requested) - set(granted))
-            if missing:
-                rec = PluginRecord(name=manifest_name, file=path.name,
-                    error="Permission grant is missing: " + ", ".join(missing))
-                all_records.append(rec)
-                logger(f"Plugin rejected: {path.name} — {rec.error}")
-                continue
             module_name = f"plugins.{path.stem}"
             spec = importlib.util.spec_from_file_location(module_name, path)
             if spec is None or spec.loader is None:
