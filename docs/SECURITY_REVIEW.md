@@ -5,7 +5,7 @@ penetration-test report or a claim that the application is fully secure.
 
 ## Implemented in this change set
 
-- In-memory rate limiting for dashboard PIN and paired-device authentication.
+- In-memory rate limiting for dashboard PIN, QR-key, and paired-device authentication.
 - Security-related response headers and no-store cache policy for dashboard HTTP
   responses.
 - Dependency-free unit tests for the rate limiter, confirmation gate, and undo
