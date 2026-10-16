@@ -72,7 +72,7 @@ class OfficeEditorTests(unittest.TestCase):
             "references": ["Autor. (2024). Obra.", "Outra fonte. (2023)."],
         })
         self.assertIn("Added 2 bibliography entries", ref_result)
-        final = self.docs / "book-edited-2.docx"
+        final = self.docs / "book-edited-edited.docx"
         self.assertTrue(final.exists())
         check = Document(final)
         self.assertIn("Referências bibliográficas", [p.text for p in check.paragraphs])
