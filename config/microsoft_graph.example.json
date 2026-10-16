@@ -1,3 +1,4 @@
 {
-  "client_id": "YOUR_MICROSOFT_ENTRA_PUBLIC_CLIENT_ID"
+  "client_id": "YOUR_MICROSOFT_ENTRA_PUBLIC_CLIENT_ID",
+  "tenant_id": "common"
 }

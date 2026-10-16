@@ -12,7 +12,7 @@ or filesystem authorization layer.
 - `office_presentations`: create editable PPTX presentations from slide titles, body text and bullet lists.
 - `image_tools`: inspect image metadata, resize, convert and compress images locally.
 - `document_conversion`: export text to PDF with ReportLab, convert DOCX to PDF through LibreOffice or Windows Microsoft Word, extract selectable PDF text with pdfplumber or PyPDF2, and OCR scanned PDFs with PyMuPDF + pytesseract + the separately installed Tesseract engine.
-- `office_graph`: delegated Microsoft Graph device-code sign-in for personal Microsoft accounts; read Outlook messages, create calendar events, list OneDrive items, upload/download files, and list OneNote notebooks where the account/API supports it. Uploads larger than 4 MiB use Microsoft Graph upload sessions with chunked transfer and resumable progress saved in the OS credential vault. Sending mail, creating events and uploads request explicit UI confirmation.
+- `office_graph`: delegated Microsoft Graph device-code sign-in for personal or work/school Microsoft accounts (depending on the configured tenant and Entra app registration); manage Outlook events and messages, organize OneDrive items, upload/download files, and list/create OneNote pages where the account/API supports it. Uploads larger than 4 MiB use Microsoft Graph upload sessions with chunked transfer and resumable progress saved in the OS credential vault. Sending mail, creating events and uploads request explicit UI confirmation.
 
 New outputs are created under `~/Documents/MarkLV` by default. The user may provide
 another directory inside their home folder or the operating system temporary
@@ -20,9 +20,9 @@ directory. Existing output files are not overwritten; a unique filename is chose
 Path checks reuse the application's shared path policy. These checks are not an
 OS sandbox and cannot eliminate all filesystem race conditions.
 
-## Microsoft personal account integration
+## Microsoft 365 integration (personal and work/school accounts)
 
-The account choice is Microsoft personal (Outlook.com/Hotmail). Graph support is implemented as an opt-in action, but it cannot authenticate until the user registers a public-client application and supplies its client ID. In Microsoft Entra, configure the app to support personal Microsoft accounts and enable public-client/device-code flow.
+Graph support is implemented as an opt-in action, but it cannot authenticate until the user registers a public-client application and supplies its client ID. In Microsoft Entra, enable public-client/device-code flow and configure supported account types to match the selected tenant audience. Use `common` when the app registration allows both personal and work/school accounts, `consumers` for personal accounts only, or `organizations` for work/school accounts only. The selected tenant audience does not override the account types configured in Entra.
 
 ### Local setup on Windows
 
