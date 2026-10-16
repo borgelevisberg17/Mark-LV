@@ -104,6 +104,24 @@ class ActionExecutionSecurityTests(unittest.TestCase):
         self.assertIn("The UI confirmation is the authority", prompt)
         self.assertIn("do not add unnecessary confirmation prompts", prompt)
 
+    def test_execution_engine_validates_timeouts_and_command_parsing(self):
+        from core.execution import ExecutionPolicyError, _validate_timeout, parse_command
+
+        self.assertEqual(_validate_timeout(30), 30)
+        for invalid in (0, -1, 301, "not-a-number"):
+            with self.subTest(timeout=invalid):
+                with self.assertRaises(ExecutionPolicyError):
+                    _validate_timeout(invalid)
+        self.assertEqual(parse_command("python main.py"), ["python", "main.py"])
+        with self.assertRaises(ExecutionPolicyError):
+            parse_command("")
+
+    def test_generated_python_runs_in_timed_child_process(self):
+        from core.execution import run_python_code
+
+        result = run_python_code("print('execution-engine-ok')", timeout=10)
+        self.assertIn("execution-engine-ok", result)
+
     def test_file_actions_use_shared_path_policy(self):
         controller = _read("actions/file_controller.py")
         processor = _read("actions/file_processor.py")
