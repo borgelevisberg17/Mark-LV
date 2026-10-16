@@ -17,7 +17,7 @@ class PathPolicyTests(unittest.TestCase):
             root = Path(temp) / "workspace"
             root.mkdir()
             target = resolve_child_path(root, "src/main.py", roots=[root])
-            self.assertEqual(target, root / "src" / "main.py")
+            self.assertEqual(target, root.resolve() / "src" / "main.py")
             self.assertTrue(target.is_relative_to(root.resolve()))
 
     def test_rejects_posix_and_windows_traversal(self):
