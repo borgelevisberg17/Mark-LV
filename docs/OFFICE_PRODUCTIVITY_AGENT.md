@@ -11,6 +11,7 @@ or filesystem authorization layer.
 - `office_presentations`: create editable PPTX presentations from slide titles, body text and bullet lists.
 - `image_tools`: inspect image metadata, resize, convert and compress images locally.
 - `document_conversion`: export text to PDF with ReportLab and extract selectable PDF text with pdfplumber or PyPDF2.
+- `office_graph`: delegated Microsoft Graph device-code sign-in for personal Microsoft accounts; read Outlook messages, create calendar events, list OneDrive items, upload/download small files, and list OneNote notebooks where the account/API supports it. Sending mail, creating events and uploading files request explicit UI confirmation.
 
 New outputs are created under `~/Documents/MarkLV` by default. The user may provide
 another directory inside their home folder or the operating system temporary
@@ -20,13 +21,9 @@ OS sandbox and cannot eliminate all filesystem race conditions.
 
 ## Microsoft personal account integration
 
-The account choice is Microsoft personal (Outlook.com/Hotmail). This first phase
-does **not** claim that Outlook mail, Microsoft Calendar, OneDrive or OneNote APIs
-are connected. Those require a Microsoft Entra app registration, delegated
-permissions compatible with personal Microsoft accounts, a sign-in/token flow,
-and tests against the actual Graph endpoints. They should be implemented as a
-separate follow-up phase after local file actions pass CI. Never place a client
-secret or access token in source code or audit logs.
+The account choice is Microsoft personal (Outlook.com/Hotmail). Graph support is implemented as an opt-in action, but it cannot authenticate until the user registers a public-client application and supplies its client ID. In Microsoft Entra, configure the app to support personal Microsoft accounts and enable public-client/device-code flow. Copy config/microsoft_graph.example.json to config/microsoft_graph.json and replace the placeholder, or set MARKLV_MICROSOFT_CLIENT_ID. Install the declared keyring dependency and ensure a secure OS credential vault is available. Call office_graph with start_login, complete the displayed browser code, then call poll_login.
+
+The implementation requests delegated Graph scopes, stores tokens in the OS credential vault, refreshes access tokens when possible, and never writes tokens to source or audit logs. Test against a real personal Microsoft account is still required. Some account/API features may be unavailable; errors are surfaced instead of simulated. General Microsoft Forms creation is intentionally unsupported.
 
 ## Explicit limitations
 
