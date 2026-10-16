@@ -231,6 +231,23 @@ class OfficeEditorTests(unittest.TestCase):
             self.assertIn(b"pt-AO", opf)
             self.assertIn(b"Descri", opf)
 
+    def test_epubcheck_optional_and_nonzero_exit_is_rejected(self):
+        from types import SimpleNamespace
+
+        with patch("actions.office_editor.shutil.which", return_value=None):
+            self.assertIn("not installed", office_editor._run_epubcheck(self.docs / "book.epub"))
+        with patch("actions.office_editor.shutil.which", return_value="epubcheck"), patch(
+            "actions.office_editor.subprocess.run",
+            return_value=SimpleNamespace(returncode=0, stdout="No errors or warnings", stderr=""),
+        ):
+            self.assertIn("EPUBCheck passed", office_editor._run_epubcheck(self.docs / "book.epub"))
+        with patch("actions.office_editor.shutil.which", return_value="epubcheck"), patch(
+            "actions.office_editor.subprocess.run",
+            return_value=SimpleNamespace(returncode=1, stdout="ERROR: invalid EPUB", stderr=""),
+        ):
+            with self.assertRaisesRegex(ValueError, "EPUBCheck rejected"):
+                office_editor._run_epubcheck(self.docs / "book.epub")
+
     def test_action_is_discoverable_by_existing_registry(self):
         from core.action_loader import discover_actions
 
