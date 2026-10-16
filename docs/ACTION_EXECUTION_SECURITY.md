@@ -21,6 +21,12 @@ Scope: Python action modules and adjacent process/network/file-operation surface
 - `actions/desktop.py`: AI-generated Python is no longer passed to `exec`; arbitrary desktop task mode fails closed until a separate, OS-enforced runner is provided.
 - `actions/file_processor.py`: the `code / run` operation now refuses direct execution. Code can still be reviewed/explained; execution requires an isolated runner.
 
+- `core/path_policy.py`: new shared canonical path policy; resolves symlinks before containment checks, rejects absolute child paths and POSIX/Windows traversal forms, and constrains user file processing to the home and temporary directories.
+- `actions/file_controller.py`: routes path checks through the shared policy; nested names reject traversal; rename accepts only a single safe name; move/copy into a destination directory resolves the final child path again.
+- `actions/file_processor.py`: input paths and generated sibling outputs are checked against allowed roots. Archive extraction no longer calls `shutil.unpack_archive`; ZIP/TAR extraction pre-validates entries, rejects traversal, links and special files, refuses overwrites, and caps extraction at 10,000 entries / 2 GiB.
+- `actions/dev_agent.py`: project file paths are constrained beneath the project root. Automatic dependency installation, auto-install recovery and generated project execution now fail closed. The agent still generates source files and may open VS Code, but does not install packages or run generated code without an OS-enforced isolated runner.
+- Added `tests/test_path_policy.py` for traversal and symlink escapes, plus regression checks for disabled unisolated project execution and shared file policy use.
+
 ## Inventory: file writes, moves, copies, and deletion
 
 | Module | Operations found | Security/side-effect notes |
@@ -63,10 +69,10 @@ Network operations need explicit timeouts, response-size limits, URL scheme vali
 
 ## Remaining high-priority work
 
-1. Give `file_controller` and `file_processor` one shared path policy: canonicalize paths, constrain them to approved roots, protect against symlink/path traversal, and make overwrite behavior explicit.
+1. **Partially implemented:** `file_controller` and `file_processor` now share canonical path containment and archive extraction checks. Continue testing path races, output overwrite behavior in non-archive converters, and operations on network-mounted filesystems.
 2. Add explicit capabilities to each action (read/write/delete/network/process/system settings) and enforce them in a central dispatcher.
 3. Define confirmation requirements for destructive operations, scheduled-task changes, shutdown/reboot, network toggles, and external data sharing.
-4. Isolate `dev_agent` build/run/package-install operations in a disposable worker with OS-enforced filesystem/network/resource limits.
+4. **Execution remains disabled:** implement a disposable `dev_agent` worker with OS-enforced filesystem/network/resource limits before restoring dependency installation or project execution.
 5. Replace the remaining dashboard batch-file shell invocation and audit every `subprocess` call for timeouts, return-code handling, input bounds, and least privilege.
 6. Add tests for path traversal, destructive-operation confirmation, URL validation, timeouts, and denied arbitrary code execution.
 
