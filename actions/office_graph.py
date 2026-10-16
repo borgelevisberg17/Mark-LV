@@ -184,7 +184,7 @@ def _poll_login() -> str:
             _PENDING_FLOW = None
             return "Sign-in was declined; no account was connected."
         return f"Microsoft sign-in failed: {payload.get('error_description', error or 'unknown error')}"
-    except (requests.RequestException, ValueError, TypeError) as exc:
+    except Exception as exc:
         return f"Microsoft sign-in poll failed: {exc}"
 
 
