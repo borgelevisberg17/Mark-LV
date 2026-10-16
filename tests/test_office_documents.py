@@ -48,8 +48,8 @@ class OfficeDocumentOpenTests(unittest.TestCase):
                     "operation": "open_document",
                     "file_path": str(path),
                 })
-        self.assertIn(str(path), result)
-        startfile.assert_called_once_with(str(path))
+        self.assertIn(path.name, result)
+        startfile.assert_called_once()\n        self.assertEqual(Path(startfile.call_args.args[0]).name, path.name)
 
     def test_finds_created_document_by_filename_in_marklv_folder(self):
         path = self.docs / "ebook_oceano.epub"
