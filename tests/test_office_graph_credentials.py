@@ -111,6 +111,46 @@ class MicrosoftCredentialStorageTests(unittest.TestCase):
         )
         self.assertEqual(office_graph._load_cache(), previous)
 
+
+    def test_token_storage_failure_ends_consumed_device_flow_without_plaintext_fallback(self):
+        class Response:
+            status_code = 200
+
+            @staticmethod
+            def json():
+                return {
+                    "access_token": "secret-access-token",
+                    "refresh_token": "secret-refresh-token",
+                    "expires_in": 3600,
+                    "scope": "User.Read offline_access",
+                }
+
+        class Requests:
+            @staticmethod
+            def post(*args, **kwargs):
+                return Response()
+
+        office_graph._PENDING_FLOW = {
+            "device_code": "consumed-device-code",
+            "interval": 5,
+            "expires_at": 9999999999,
+            "scopes": ["User.Read", "offline_access"],
+        }
+        with patch.object(office_graph, "_requests", return_value=Requests):
+            with patch.object(office_graph, "_client_id", return_value="test-client-id"):
+                with patch.object(
+                    office_graph,
+                    "_save_cache",
+                    side_effect=OSError(1783, "CredWrite rejected credential blob"),
+                ) as save_cache:
+                    result = office_graph._poll_login()
+
+        self.assertIn("could not securely save the tokens", result)
+        self.assertIn("No plaintext fallback was used", result)
+        self.assertNotIn("secret-access-token", result)
+        self.assertIsNone(office_graph._PENDING_FLOW)
+        save_cache.assert_called_once()
+
     def test_chunk_size_is_below_conservative_utf16_byte_ceiling(self):
         self.assertLessEqual(
             office_graph._CREDENTIAL_CHUNK_CHARS * 2,
