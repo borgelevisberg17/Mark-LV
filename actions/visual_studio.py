@@ -101,12 +101,11 @@ def _compose_cover_text(image_path: Path, params: dict) -> Path:
         base = opened.convert("RGBA")
     width, height = base.size
     overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
-    pixels = overlay.load()
+    gradient_draw = ImageDraw.Draw(overlay)
     start_y = int(height * 0.52)
     for y in range(start_y, height):
         alpha = int(35 + 175 * ((y - start_y) / max(1, height - start_y)))
-        for x in range(width):
-            pixels[x, y] = (8, 12, 20, alpha)
+        gradient_draw.line((0, y, width, y), fill=(8, 12, 20, alpha))
     composed = Image.alpha_composite(base, overlay)
     draw = ImageDraw.Draw(composed)
     margin = max(28, int(width * 0.075))
