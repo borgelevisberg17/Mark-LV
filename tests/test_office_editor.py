@@ -123,6 +123,32 @@ class OfficeEditorTests(unittest.TestCase):
         self.assertEqual("s", check["Budget"]["A2"].data_type)
         check.close()
 
+    def test_xlsx_formula_and_formatting_edits(self):
+        from openpyxl import Workbook, load_workbook
+
+        source = self.docs / "formula.xlsx"
+        workbook = Workbook()
+        workbook.active.title = "Budget"
+        workbook.active["A1"] = 12
+        workbook.save(source)
+        formula_result = office_editor.office_editor({
+            "operation": "set_formulas", "file_path": str(source), "sheet_name": "Budget",
+            "formulas": {"B1": "=SUM(A1:A1)"},
+        })
+        self.assertIn("Set 1 formulas", formula_result)
+        formula_copy = self.docs / "formula-edited.xlsx"
+        format_result = office_editor.office_editor({
+            "operation": "format_cells", "file_path": str(formula_copy), "sheet_name": "Budget",
+            "formats": {"B1": {"bold": True, "fill_color": "FFF2CC", "number_format": "#,##0.00"}},
+        })
+        self.assertIn("Applied formatting", format_result)
+        final = load_workbook(self.docs / "formula-edited-edited.xlsx", data_only=False)
+        self.assertEqual("=SUM(A1:A1)", final["Budget"]["B1"].value)
+        self.assertTrue(final["Budget"]["B1"].font.bold)
+        self.assertEqual("FFFFF2CC", final["Budget"]["B1"].fill.fgColor.rgb)
+        self.assertEqual("#,##0.00", final["Budget"]["B1"].number_format)
+        final.close()
+
     def test_pptx_shape_text_edit_preserves_original_and_validates_copy(self):
         from pptx import Presentation
 
