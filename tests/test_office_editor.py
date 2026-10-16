@@ -1,4 +1,5 @@
 """Regression tests for advanced Office editing and EPUB publishing."""
+import importlib.util
 import tempfile
 import unittest
 import zipfile
@@ -8,6 +9,7 @@ from unittest.mock import patch
 from actions import office_editor
 
 
+@unittest.skipUnless(all(importlib.util.find_spec(name) for name in ('docx', 'openpyxl', 'pptx', 'PIL')), 'Office editing dependencies are installed in the Office artifact test environment')
 class OfficeEditorTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
