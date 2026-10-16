@@ -77,6 +77,9 @@ class OperationRegistry:
                 if rec.get("status") == "running":
                     rec["status"] = "unknown_after_restart"
                     rec["result"] = "Process restarted while this operation was running; verify its effects before retrying."
+                elif rec.get("status") == "awaiting_confirmation":
+                    rec["status"] = "expired"
+                    rec["result"] = "Confirmation was pending when the app restarted; it was not replayed."
         except OSError:
             # Auditing failure must not crash startup; write attempts will be logged in memory.
             return
@@ -119,7 +122,7 @@ class OperationRegistry:
             existing_id = self._by_key.get(key_hash)
             if existing_id:
                 existing = self._records.get(existing_id)
-                if existing and existing.get("status") not in {"cancelled", "expired", "failed"}:
+                if existing and existing.get("status") not in {"cancelled", "expired"}:
                     return dict(existing), False
             now = time.monotonic()
             record = {
