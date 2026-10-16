@@ -243,7 +243,8 @@ def _safe_remote_path(raw: str) -> str:
     posix = PurePosixPath(original)
     if win.drive or win.is_absolute() or posix.is_absolute() or original.startswith(("\\", "/")):
         raise ValueError("A relative OneDrive path is required.")
-    if any(part in {"..", "."} for part in posix.parts) or any(part in {"..", "."} for part in win.parts):
+    components = original.replace("\\", "/").split("/")
+    if original in {".", ".."} or any(part in {"..", "."} for part in components):
         raise ValueError("OneDrive path cannot contain traversal.")
     value = original.rstrip("/")
     if not value:
