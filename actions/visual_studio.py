@@ -154,20 +154,27 @@ def _insert_pptx(image_path: Path, raw_target: str, slide_index=None) -> Path:
         raise ValueError("Target presentation exceeds the 100 MiB limit.")
     output = unique_output_path(target.parent, safe_filename(target.stem + "-visual", target.stem + "-visual", ".pptx"))
     presentation = Presentation(target)
+    from PIL import Image
+    with Image.open(image_path) as image:
+        image_width, image_height = image.size
     if slide_index is None:
-        # Append a dedicated full-bleed visual slide using the blank layout.
+        # Append a dedicated visual slide; fit without distorting the source image.
         layout = next((item for item in presentation.slide_layouts if len(item.placeholders) == 0), presentation.slide_layouts[-1])
         slide = presentation.slides.add_slide(layout)
-        left = top = Inches(0)
-        width, height = presentation.slide_width, presentation.slide_height
+        bound_left = bound_top = Inches(0)
+        bound_width, bound_height = presentation.slide_width, presentation.slide_height
     else:
         index = int(slide_index)
         if index < 0 or index >= len(presentation.slides):
             raise ValueError(f"slide_index must be between 0 and {len(presentation.slides) - 1}.")
         slide = presentation.slides[index]
-        left, top = Inches(1), Inches(1)
-        width = presentation.slide_width - Inches(2)
-        height = presentation.slide_height - Inches(2)
+        bound_left = bound_top = Inches(1)
+        bound_width = presentation.slide_width - Inches(2)
+        bound_height = presentation.slide_height - Inches(2)
+    scale = min(bound_width / image_width, bound_height / image_height)
+    width, height = int(image_width * scale), int(image_height * scale)
+    left = bound_left + int((bound_width - width) / 2)
+    top = bound_top + int((bound_height - height) / 2)
     slide.shapes.add_picture(str(image_path), left, top, width=width, height=height)
     temporary = output.with_name(f".{output.stem}-{uuid.uuid4().hex}.tmp.pptx")
     try:
