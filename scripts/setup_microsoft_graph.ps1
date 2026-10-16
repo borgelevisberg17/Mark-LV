@@ -12,6 +12,12 @@ if (-not (Test-Path (Join-Path $repoRoot ".git"))) {
 }
 
 $clientId = Read-Host "Microsoft Entra Application (client) ID"
+$tenantChoice = Read-Host "Account audience: common (personal + work/school), consumers (personal), organizations (work/school) [common]"
+$tenantChoice = $tenantChoice.Trim().ToLowerInvariant()
+if ([string]::IsNullOrWhiteSpace($tenantChoice)) { $tenantChoice = "common" }
+if ($tenantChoice -notin @("common", "consumers", "organizations")) {
+    throw "Tenant must be common, consumers, or organizations. No file was written."
+}
 $clientId = $clientId.Trim()
 $parsedGuid = [Guid]::Empty
 if (-not [Guid]::TryParse($clientId, [ref]$parsedGuid)) {
@@ -29,7 +35,7 @@ if (-not (Test-Path $configDirectory)) {
     New-Item -ItemType Directory -Path $configDirectory -Force | Out-Null
 }
 
-$json = @{ client_id = $parsedGuid.ToString() } | ConvertTo-Json
+$json = @{ client_id = $parsedGuid.ToString(); tenant_id = $tenantChoice } | ConvertTo-Json
 $utf8WithoutBom = New-Object System.Text.UTF8Encoding($false)
 [System.IO.File]::WriteAllText($configPath, ($json + [Environment]::NewLine), $utf8WithoutBom)
 
@@ -37,6 +43,7 @@ Write-Host ""
 Write-Host "Local Microsoft Graph configuration created."
 Write-Host "Path: $configPath"
 Write-Host "Git ignore check: passed (the file will not be committed by normal Git adds)."
+Write-Host "Tenant audience: $tenantChoice"
 Write-Host "No client secret or token was created or stored."
 Write-Host ""
 Write-Host "Next: ensure Python dependencies are installed, launch Mark-LV, then call office_graph with operation=start_login."
