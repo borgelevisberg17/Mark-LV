@@ -151,7 +151,7 @@ def _poll_login() -> str:
         return "The device code expired. Start a new login."
     client_id = _client_id()
     try:
-        response = requests.post(
+        response = _requests().post(
             _TOKEN_ENDPOINT,
             data={
                 "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
@@ -191,7 +191,7 @@ def _access_token(required: set[str]) -> tuple[str | None, str]:
         return None, f"Authorization is missing: {missing}. Call office_graph with operation=start_login and scope_set=all."
     if cache.get("access_token") and time.time() < float(cache.get("expires_at", 0)):
         return str(cache["access_token"]), ""
-    response = requests.post(
+    response = _requests().post(
         _TOKEN_ENDPOINT,
         data={
             "client_id": _client_id(),
@@ -236,13 +236,18 @@ def _digest(value: str) -> str:
 
 def _safe_remote_path(raw: str) -> str:
     from pathlib import PurePosixPath, PureWindowsPath
-    value = str(raw or "").strip().strip("/")
-    win = PureWindowsPath(value)
-    posix = PurePosixPath(value)
-    if not value or "\x00" in value or win.drive or win.is_absolute() or posix.is_absolute():
+    original = str(raw or "").strip()
+    if not original or "\x00" in original:
+        raise ValueError("A relative OneDrive path is required.")
+    win = PureWindowsPath(original)
+    posix = PurePosixPath(original)
+    if win.drive or win.is_absolute() or posix.is_absolute() or original.startswith(("\\", "/")):
         raise ValueError("A relative OneDrive path is required.")
     if any(part in {"..", "."} for part in posix.parts) or any(part in {"..", "."} for part in win.parts):
         raise ValueError("OneDrive path cannot contain traversal.")
+    value = original.rstrip("/")
+    if not value:
+        raise ValueError("A relative OneDrive path is required.")
     return value
 
 
