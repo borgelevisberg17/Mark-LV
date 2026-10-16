@@ -9,6 +9,7 @@ import time
 from collections import defaultdict, deque
 from threading import Lock
 from typing import Callable
+from urllib.parse import urlsplit
 
 
 class LoginAttemptLimiter:
@@ -119,3 +120,16 @@ class SessionTokenRegistry:
             count = len(self._expires_at)
             self._expires_at.clear()
             return count
+
+
+def websocket_origin_matches_host(origin: str, host: str) -> bool:
+    """Accept only browser origins whose authority exactly matches the request host."""
+    origin = str(origin or "").strip()
+    host = str(host or "").strip()
+    if not origin or not host:
+        return False
+    try:
+        parsed = urlsplit(origin)
+    except ValueError:
+        return False
+    return parsed.scheme in ("http", "https") and parsed.netloc.casefold() == host.casefold()
