@@ -257,31 +257,6 @@ def _read_plugin_policy(plugins_dir: Path) -> dict:
         return {}
 
 
-_ALLOWED_PLUGIN_PERMISSIONS = {"filesystem.read", "filesystem.write", "network", "process", "desktop", "clipboard", "system", "secrets", "package_install"}
-
-
-def _static_plugin_manifest(path: Path) -> dict:
-    """Inspect literal metadata without executing plugin code."""
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    for node in tree.body:
-        targets = node.targets if isinstance(node, ast.Assign) else ([node.target] if isinstance(node, ast.AnnAssign) else [])
-        if any(isinstance(target, ast.Name) and target.id == "PLUGIN" for target in targets):
-            manifest = ast.literal_eval(node.value)
-            if isinstance(manifest, dict):
-                return manifest
-    raise ValueError("PLUGIN must be a literal dictionary to be inspected without executing code.")
-
-
-def _read_plugin_policy(plugins_dir: Path) -> dict:
-    """Read explicit user trust and capability grants; absent policy denies by default."""
-    path = plugins_dir.parent / "config" / "plugin_permissions.json"
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return data.get("plugins", {}) if isinstance(data.get("plugins", {}), dict) else {}
-    except (OSError, ValueError, TypeError):
-        return {}
-
-
 def discover_plugins(plugins_dir: Path, core_tool_names: set[str],
                       logger: Callable[[str], None] = print,
                       notify: Callable[[str], None] | None = None) -> PluginRegistry:
