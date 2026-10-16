@@ -13,7 +13,6 @@ import time
 from pathlib import Path
 from urllib.parse import quote
 
-import requests
 
 from core.confirm import request as request_confirmation
 from core.path_policy import PathPolicyError, resolve_user_path, user_accessible_roots
@@ -53,6 +52,14 @@ _REQUIRED = {
     "drive_download": {"Files.ReadWrite"},
     "onenote_list": {"Notes.ReadWrite"},
 }
+
+
+def _requests():
+    try:
+        import requests
+        return requests
+    except ImportError as exc:
+        raise RuntimeError("Microsoft Graph requires requests. Install it with: pip install requests") from exc
 
 
 def _client_id() -> str:
@@ -108,7 +115,7 @@ def _start_login(scope_set: str) -> str:
         )
     scopes = _SCOPES_BY_SET.get(scope_set, _SCOPES_BY_SET["all"])
     try:
-        response = requests.post(
+        response = _requests().post(
             _DEVICE_ENDPOINT,
             data={"client_id": client_id, "scope": " ".join(scopes)},
             timeout=15,
@@ -130,7 +137,7 @@ def _start_login(scope_set: str) -> str:
             + ". After you finish signing in, call office_graph with operation=poll_login. "
             "The code expires; no token has been stored yet."
         )
-    except (requests.RequestException, ValueError, TypeError) as exc:
+    except Exception as exc:
         return f"Microsoft sign-in could not start: {exc}"
 
 
@@ -206,7 +213,7 @@ def _access_token(required: set[str]) -> tuple[str | None, str]:
 
 
 def _graph(method: str, endpoint: str, token: str, *, params=None, json_body=None, data=None, headers=None):
-    response = requests.request(
+    response = _requests().request(
         method, _GRAPH + endpoint, params=params,
         json=json_body, data=data,
         headers={"Authorization": "Bearer " + token, **(headers or {})},
@@ -379,7 +386,7 @@ def office_graph(parameters: dict, player=None, speak=None) -> str:
                 return "drive_download requires a safe remote_path relative to the OneDrive root."
             remote = _safe_remote_path(remote)
             endpoint = "/me/drive/root:/" + quote(remote, safe="/") + ":/content"
-            response = requests.get(_GRAPH + endpoint, headers={"Authorization": "Bearer " + token}, timeout=30, stream=True)
+            response = _requests().get(_GRAPH + endpoint, headers={"Authorization": "Bearer " + token}, timeout=30, stream=True)
             if response.status_code >= 400:
                 return f"OneDrive download failed with HTTP {response.status_code}."
             directory = safe_output_directory(str(params.get("output_dir", "") or ""))
