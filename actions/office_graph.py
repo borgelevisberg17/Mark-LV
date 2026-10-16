@@ -79,6 +79,9 @@ _REQUIRED = {
     "drive_upload_resume": {"Files.ReadWrite"},
     "drive_download": {"Files.ReadWrite"},
     "onenote_list": {"Notes.ReadWrite"},
+    "onenote_sections": {"Notes.ReadWrite"},
+    "onenote_pages": {"Notes.ReadWrite"},
+    "onenote_create_page": {"Notes.ReadWrite"},
 }
 
 
