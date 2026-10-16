@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from actions.visual_studio import _extract_image, _insert_docx, _insert_pptx, visual_studio
+from actions.visual_studio import _compose_cover_text, _extract_image, _insert_docx, _insert_pptx, visual_studio
 
 
 class VisualStudioUnitTests(unittest.TestCase):
@@ -27,6 +27,25 @@ class VisualStudioUnitTests(unittest.TestCase):
 
     def test_invalid_operation_is_rejected_without_network(self):
         self.assertIn("Unsupported operation", visual_studio({"operation": "delete"}))
+
+    @unittest.skipUnless(importlib.util.find_spec("PIL"), "Pillow is not installed")
+    def test_cover_typography_creates_separate_valid_asset(self):
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as folder:
+            raw = Path(folder) / "raw.png"
+            Image.new("RGB", (640, 960), "navy").save(raw)
+            designed = _compose_cover_text(raw, {
+                "cover_title": "A Jornada do Conhecimento",
+                "cover_subtitle": "Uma edição especial",
+                "cover_author": "Borge Levisberg",
+            })
+            self.assertNotEqual(raw, designed)
+            self.assertTrue(raw.is_file(), "Raw generated asset must be retained")
+            self.assertTrue(designed.is_file())
+            with Image.open(designed) as image:
+                image.verify()
+            self.assertNotEqual(raw.read_bytes(), designed.read_bytes())
 
 
 @unittest.skipUnless(
@@ -54,6 +73,26 @@ class VisualStudioOfficeInsertionTests(unittest.TestCase):
             self.assertGreaterEqual(len(reopened.inline_shapes), 1)
             self.assertIn("Original content", "\n".join(p.text for p in reopened.paragraphs))
 
+    def test_insert_docx_inline_mode_and_caption_preserve_content_order(self):
+        from PIL import Image
+        from docx import Document
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            image_path = root / "illustration.png"
+            Image.new("RGB", (300, 200), "white").save(image_path)
+            source = root / "report.docx"
+            document = Document()
+            document.add_paragraph("Existing report text")
+            document.save(source)
+
+            output = _insert_docx(image_path, str(source), insertion_mode="inline", caption="Figure 1 — Illustration")
+            reopened = Document(output)
+            texts = [paragraph.text for paragraph in reopened.paragraphs]
+            self.assertLess(texts.index("Existing report text"), texts.index("Figure 1 — Illustration"))
+            self.assertTrue(source.is_file())
+            self.assertGreaterEqual(len(reopened.inline_shapes), 1)
+
     def test_insert_pptx_appends_visual_slide_and_preserves_source(self):
         from PIL import Image
         from pptx import Presentation
@@ -67,12 +106,13 @@ class VisualStudioOfficeInsertionTests(unittest.TestCase):
             presentation.slides.add_slide(presentation.slide_layouts[6])
             presentation.save(source)
 
-            output = _insert_pptx(image_path, str(source))
+            output = _insert_pptx(image_path, str(source), caption="Campaign poster")
             self.assertTrue(Path(output).is_file())
             self.assertTrue(source.is_file())
             reopened = Presentation(output)
             self.assertEqual(len(reopened.slides), 2)
             self.assertTrue(any(shape.shape_type == 13 for shape in reopened.slides[-1].shapes))
+            self.assertTrue(any(shape.has_text_frame and shape.text == "Campaign poster" for shape in reopened.slides[-1].shapes))
 
 
 if __name__ == "__main__":
