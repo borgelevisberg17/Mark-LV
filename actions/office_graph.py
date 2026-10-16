@@ -71,6 +71,9 @@ def _client_id() -> str:
 def _keyring():
     try:
         import keyring
+        backend = keyring.get_keyring()
+        if getattr(backend, "priority", 0) <= 0:
+            raise RuntimeError("No secure operating-system credential vault is available.")
         return keyring
     except ImportError as exc:
         raise RuntimeError("Secure token storage requires keyring. Install it with: pip install keyring") from exc
@@ -224,6 +227,18 @@ def _digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:24]
 
 
+def _safe_remote_path(raw: str) -> str:
+    from pathlib import PurePosixPath, PureWindowsPath
+    value = str(raw or "").strip().strip("/")
+    win = PureWindowsPath(value)
+    posix = PurePosixPath(value)
+    if not value or "\x00" in value or win.drive or win.is_absolute() or posix.is_absolute():
+        raise ValueError("A relative OneDrive path is required.")
+    if any(part in {"..", "."} for part in posix.parts) or any(part in {"..", "."} for part in win.parts):
+        raise ValueError("OneDrive path cannot contain traversal.")
+    return value
+
+
 def office_graph(parameters: dict, player=None, speak=None) -> str:
     params = parameters or {}
     operation = str(params.get("operation", "")).strip().lower()
@@ -323,8 +338,7 @@ def office_graph(parameters: dict, player=None, speak=None) -> str:
             folder = str(params.get("folder", "") or "").strip().strip("/")
             endpoint = "/me/drive/root/children"
             if folder:
-                if any(part in {"..", "."} for part in Path(folder).parts):
-                    return "Drive folder path cannot contain traversal."
+                folder = _safe_remote_path(folder)
                 endpoint = "/me/drive/root:/" + quote(folder, safe="/") + ":/children"
             data = _graph("GET", endpoint, token, params={"$top": "50", "$select": "id,name,size,file,folder,lastModifiedDateTime,webUrl"})
             items = data.get("value", [])
@@ -336,8 +350,9 @@ def office_graph(parameters: dict, player=None, speak=None) -> str:
         if operation == "drive_upload":
             raw = str(params.get("file_path", "") or "").strip()
             remote = str(params.get("remote_path", "") or "").strip().strip("/")
-            if not raw or not remote or any(part in {"..", "."} for part in Path(remote).parts):
+            if not raw or not remote:
                 return "drive_upload requires file_path and a safe remote_path relative to the OneDrive root."
+            remote = _safe_remote_path(remote)
             source = resolve_user_path(raw, roots=user_accessible_roots(), must_exist=True)
             if not source.is_file():
                 return "file_path must be an existing file."
@@ -345,7 +360,7 @@ def office_graph(parameters: dict, player=None, speak=None) -> str:
                 return "Simple OneDrive upload is capped at 4 MiB in this implementation; resumable upload sessions are not yet implemented."
             token_path = "/me/drive/root:/" + quote(remote, safe="/")
             try:
-                _graph("GET", token_path, token)
+                _graph("GET", token_path + ":", token)
                 return "A OneDrive item already exists at that path; upload refused to avoid overwriting it."
             except RuntimeError as exc:
                 if "HTTP 404" not in str(exc):
@@ -360,8 +375,9 @@ def office_graph(parameters: dict, player=None, speak=None) -> str:
 
         if operation == "drive_download":
             remote = str(params.get("remote_path", "") or "").strip().strip("/")
-            if not remote or any(part in {"..", "."} for part in Path(remote).parts):
+            if not remote:
                 return "drive_download requires a safe remote_path relative to the OneDrive root."
+            remote = _safe_remote_path(remote)
             endpoint = "/me/drive/root:/" + quote(remote, safe="/") + ":/content"
             response = requests.get(_GRAPH + endpoint, headers={"Authorization": "Bearer " + token}, timeout=30, stream=True)
             if response.status_code >= 400:
