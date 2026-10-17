@@ -734,8 +734,8 @@ def _active_word_edit(params: dict) -> str:
         document.Save()
         remaining = after.count(old)
         return (
-            f"Edited the active Word document in place: {saved_path}\\n"
-            f"Replaced approximately {max(expected - remaining, 0)} occurrence(s).\\n"
+            f"Edited the active Word document in place: {saved_path}\n"
+            f"Replaced approximately {max(expected - remaining, 0)} occurrence(s).\n"
             "The same Word window remains open; no edited copy was created."
         )
 
@@ -750,10 +750,10 @@ def _active_word_edit(params: dict) -> str:
                 "The active document has no verified saved path. Save it in Word first; no content was appended."
             )
         insert_range = document.Range(document.Content.End - 1, document.Content.End - 1)
-        insert_range.InsertAfter("\\r" + text_value.replace("\\r\\n", "\\n").replace("\\n", "\\r"))
+        insert_range.InsertAfter("\r" + text_value.replace("\r\n", "\n").replace("\n", "\r"))
         document.Save()
         return (
-            f"Appended content directly to the active Word document: {saved_path}\\n"
+            f"Appended content directly to the active Word document: {saved_path}\n"
             "The document was saved in place and remains open; no duplicate was created."
         )
 
@@ -795,7 +795,7 @@ def _active_word_edit(params: dict) -> str:
                     f"could not be removed ({exc}). Both files may remain; check before continuing."
                 )
         return (
-            f"Renamed the active Word document to: {destination}\\n"
+            f"Renamed the active Word document to: {destination}\n"
             "Verified the new file exists. Word remains open on the renamed document."
         )
 
