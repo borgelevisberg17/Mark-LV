@@ -42,29 +42,53 @@ function executeOnPage(action, p) {
         el.click(); return "Clicked " + JSON.stringify(describe(el));
       }
       case "smart_click": {
-        const q = String(p.description || "").toLowerCase();
-        const el = findByText("button,a,[role=button],input[type=submit]", q) ||
-          [...document.querySelectorAll("button,a,[role=button]")].find(e => visible(e) && q && (e.getAttribute("aria-label") || e.title || "").toLowerCase().includes(q));
-        if (!el) return "Could not find a visible button or link matching: " + q;
-        el.click(); return "Clicked " + JSON.stringify(describe(el));
+        const q = String(p.description || "").trim();
+        if (!q) return "Could not find a visible button or link: empty description.";
+        const normalize = value => String(value || "").replace(/\\s+/g, " ").trim().toLocaleLowerCase();
+        const describeTarget = el => normalize(el.getAttribute("aria-label") || el.title || el.innerText || el.textContent || el.value);
+        const all = [...document.querySelectorAll("button,a,[role=button],input[type=submit]")].filter(visible);
+        const exact = [...new Set(all.filter(el => describeTarget(el) === normalize(q)))];
+        const matches = exact.length ? exact : [...new Set(all.filter(el => describeTarget(el).includes(normalize(q))))];
+        if (!matches.length) return "Could not find a visible button or link matching: " + q;
+        if (matches.length !== 1) return "Ambiguous click target for '" + q + "': " + matches.length + " matches. No click was performed.";
+        const el = matches[0];
+        try { el.click(); } catch (e) { return "Click outcome uncertain for '" + q + "': " + (e?.message || String(e)) + ". No retry was attempted."; }
+        return "Clicked unique target " + JSON.stringify(describe(el));
       }
       case "type":
       case "smart_type": {
-        let el = p.selector ? document.querySelector(p.selector) : null;
-        if (!el && p.description) el = findByText("label", p.description)?.control || [...document.querySelectorAll("input,textarea,[contenteditable=true]")].find(e => visible(e) && (e.getAttribute("placeholder") || e.getAttribute("aria-label") || e.name || "").toLowerCase().includes(String(p.description).toLowerCase()));
-        if (!el) return "No matching input field found.";
-        el.focus();
-        if (p.clear_first !== false) {
-          if ("value" in el) el.value = "";
-          else el.textContent = "";
+        const q = String(p.description || p.selector || "").trim();
+        if (!q) return "No matching input field: empty description.";
+        let candidates = [];
+        if (p.selector) {
+          try { candidates = [...document.querySelectorAll(p.selector)].filter(visible); }
+          catch (_) { return "Invalid input selector; no text was entered."; }
+        } else {
+          const fields = [...document.querySelectorAll("input,textarea,[contenteditable=true],[role=textbox],[role=searchbox],[role=combobox]")].filter(visible);
+          const describeField = el => [el.getAttribute("placeholder"), el.getAttribute("aria-label"), el.getAttribute("name"), el.getAttribute("title"), el.getAttribute("role"), el.labels ? [...el.labels].map(label => label.innerText).join(" ") : ""].filter(Boolean).join(" ");
+          const exact = fields.filter(el => describeField(el).trim().toLocaleLowerCase() === q.toLocaleLowerCase());
+          candidates = exact.length ? exact : fields.filter(el => describeField(el).toLocaleLowerCase().includes(q.toLocaleLowerCase()));
         }
-        if ("value" in el) {
-          const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), "value")?.set;
-          if (setter) setter.call(el, String(p.text || "")); else el.value = String(p.text || "");
-        } else el.textContent = String(p.text || "");
-        el.dispatchEvent(new Event("input", {bubbles:true}));
-        el.dispatchEvent(new Event("change", {bubbles:true}));
-        return "Entered text in " + JSON.stringify(describe(el));
+        candidates = [...new Set(candidates)];
+        if (!candidates.length) return "No matching input field found for: " + q;
+        if (candidates.length !== 1) return "Ambiguous input target for '" + q + "': " + candidates.length + " matches. No text was entered.";
+        const el = candidates[0];
+        try {
+          el.focus();
+          if (p.clear_first !== false) {
+            if ("value" in el) el.value = "";
+            else el.textContent = "";
+          }
+          if ("value" in el) {
+            const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), "value")?.set;
+            if (setter) setter.call(el, String(p.text || "")); else el.value = String(p.text || "");
+          } else el.textContent = String(p.text || "");
+          el.dispatchEvent(new Event("input", {bubbles:true}));
+          el.dispatchEvent(new Event("change", {bubbles:true}));
+        } catch (e) {
+          return "Typing outcome uncertain for '" + q + "': " + (e?.message || String(e)) + ". No alternate input was attempted.";
+        }
+        return "Entered text in unique input " + JSON.stringify(describe(el));
       }
       case "fill_form": {
         const fields = p.fields || {}; const done = [];
