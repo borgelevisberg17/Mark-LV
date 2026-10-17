@@ -1,6 +1,29 @@
 """Regression tests for unique Playwright social-control locators."""
-import asyncio
+import sys
+import types
 import unittest
+
+# Keep this unit test dependency-free: it never starts a browser or localhost bridge.
+if "playwright.async_api" not in sys.modules:
+    playwright_package = types.ModuleType("playwright")
+    playwright_api = types.ModuleType("playwright.async_api")
+    class PlaywrightTimeout(Exception):
+        pass
+    playwright_api.async_playwright = lambda: None
+    playwright_api.BrowserContext = object
+    playwright_api.Page = object
+    playwright_api.Playwright = object
+    playwright_api.TimeoutError = PlaywrightTimeout
+    sys.modules.setdefault("playwright", playwright_package)
+    sys.modules["playwright.async_api"] = playwright_api
+
+if "core.browser_bridge" not in sys.modules:
+    bridge_module = types.ModuleType("core.browser_bridge")
+    class FakeBrowserBridge:
+        def start(self): return False
+        def connected(self): return False
+    bridge_module.BrowserBridge = FakeBrowserBridge
+    sys.modules["core.browser_bridge"] = bridge_module
 
 from actions.browser_control import _BrowserSession
 
