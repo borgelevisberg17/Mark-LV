@@ -178,3 +178,103 @@ def test_every_configured_social_platform_has_an_approved_app_launcher_alias():
     from actions.open_app import _normalize
     for platform in social._PLATFORMS.values():
         assert _normalize(platform["app"]) is not None, platform["app"]
+
+
+def test_plan_message_is_read_only_and_orders_verification_before_send():
+    with patch.object(social, "_browser") as browser, patch("core.execution.request_execution") as request:
+        result = social.social_control({
+            "platform": "whatsapp",
+            "action": "plan",
+            "target_action": "send_message",
+            "recipient": "Alice",
+            "message": "Hello",
+            "mode": "browser",
+        })
+    assert "Preflight" in result
+    assert "verify the active conversation" in result
+    assert "Send once" in result
+    assert "do not claim delivery/read receipt" in result
+    browser.assert_not_called()
+    request.assert_not_called()
+
+
+def test_capabilities_do_not_advertise_instagram_calls():
+    result = social.social_control({"platform": "instagram", "action": "capabilities"})
+    assert "start_call" not in result
+    assert "start_video_call" not in result
+    assert "end_call" not in result
+
+
+def test_unsupported_call_is_rejected_before_confirmation():
+    with patch("core.execution.request_execution") as request:
+        result = social.social_control({
+            "platform": "instagram",
+            "action": "start_call",
+            "recipient": "Alice",
+            "mode": "browser",
+        })
+    assert "not configured" in result
+    request.assert_not_called()
+
+
+def test_call_requires_explicit_recipient_before_confirmation():
+    with patch("core.execution.request_execution") as request:
+        result = social.social_control({
+            "platform": "whatsapp",
+            "action": "start_call",
+            "mode": "browser",
+        })
+    assert "recipient/contact is required" in result
+    request.assert_not_called()
+
+
+def test_uncertain_click_does_not_retry_another_label():
+    with patch.object(social, "_browser", return_value="Bridge error: timeout") as browser:
+        try:
+            social._click_first(("Send", "Message"))
+        except RuntimeError as exc:
+            assert "outcome" in str(exc).lower() or "uncertain" in str(exc).lower()
+        else:
+            raise AssertionError("An uncertain click must fail closed")
+        browser.assert_called_once()
+
+
+def test_missing_locator_can_try_next_label_without_claiming_click():
+    with patch.object(social, "_browser", side_effect=[
+        "Could not find element: Search",
+        "Clicked element: Search Messenger",
+    ]) as browser:
+        result = social._click_first(("Search", "Search Messenger"))
+    assert "Clicked element" in result
+    assert browser.call_count == 2
+
+
+def test_message_validation_rejects_control_chars_in_recipient_and_nul_in_message():
+    for recipient, message in [("Alice" + chr(10) + "Bob", "Hello"), ("Alice", "Hello" + chr(0) + "World")]:
+        try:
+            social._validate_message_request(recipient, message)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Unsafe input must be rejected before UI interaction")
+
+
+def test_unsupported_open_mode_is_rejected_without_opening_browser():
+    with patch.object(social, "_browser") as browser:
+        result = social.social_control({
+            "platform": "whatsapp",
+            "action": "open",
+            "mode": "unknown",
+        })
+    assert "Unsupported mode" in result
+    browser.assert_not_called()
+
+
+def test_plan_rejects_calls_not_configured_for_platform():
+    result = social.social_control({
+        "platform": "instagram",
+        "action": "plan",
+        "target_action": "start_call",
+        "recipient": "Alice",
+    })
+    assert "not configured" in result

@@ -9,6 +9,7 @@ on:
   push:
     branches:
       - "feat/local-social-ui-controller"
+      - "feat/social-automation-scenarios"
       - "feat/local-social-desktop-ui"
     paths:
       - "actions/social_control.py"
