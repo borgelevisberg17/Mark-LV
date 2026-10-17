@@ -26,6 +26,16 @@ _ALLOWED_ASPECT_RATIOS = {"1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16
 _ALLOWED_IMAGE_SIZES = {"1K", "2K", "4K"}
 _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 
+
+def _resolve_office_target(raw_target: str) -> Path:
+    """Resolve document paths relative to the user's home, never the app CWD."""
+    return resolve_user_path(
+        raw_target.strip(),
+        base=Path.home(),
+        roots=user_accessible_roots(),
+        must_exist=True,
+    )
+
 _MAX_EPUB_ENTRIES = 10000
 _MAX_EPUB_MEMBER_BYTES = 100 * 1024 * 1024
 _MAX_EPUB_EXPANDED_BYTES = 750 * 1024 * 1024
@@ -259,7 +269,7 @@ def _preflight_target(raw_target: str, slide_index=None, pptx_placement=None, sh
     """Validate an Office target before consuming image-generation quota."""
     if not raw_target.strip():
         return None
-    target = resolve_user_path(raw_target.strip(), roots=user_accessible_roots(), must_exist=True)
+    target = _resolve_office_target(raw_target)
     if not target.is_file() or target.suffix.lower() not in {".docx", ".pptx", ".epub"}:
         raise ValueError("target_file_path must point to an existing .docx, .pptx or .epub file.")
     if target.stat().st_size > 100 * 1024 * 1024:
@@ -364,7 +374,7 @@ def _insert_docx(image_path: Path, raw_target: str, insertion_mode: str = "cover
     from docx import Document
     from docx.enum.text import WD_BREAK
     from docx.shared import Inches
-    target = resolve_user_path(raw_target, roots=user_accessible_roots(), must_exist=True)
+    target = _resolve_office_target(raw_target)
     if not target.is_file() or target.suffix.lower() != ".docx":
         raise ValueError("DOCX insertion requires an existing .docx file.")
     if target.stat().st_size > 100 * 1024 * 1024:
@@ -418,7 +428,7 @@ def _insert_docx(image_path: Path, raw_target: str, insertion_mode: str = "cover
 def _insert_pptx(image_path: Path, raw_target: str, slide_index=None, caption: str = "", placement: str = "append_slide", shape_index=None, alt_text: str = "") -> Path:
     from pptx import Presentation
     from pptx.util import Inches
-    target = resolve_user_path(raw_target, roots=user_accessible_roots(), must_exist=True)
+    target = _resolve_office_target(raw_target)
     if not target.is_file() or target.suffix.lower() != ".pptx":
         raise ValueError("PowerPoint insertion requires an existing .pptx file.")
     if target.stat().st_size > 100 * 1024 * 1024:
@@ -496,7 +506,7 @@ def _insert_epub_cover(image_path: Path, raw_target: str, title: str = "", alt_t
     Both EPUB 3 cover-image properties and the EPUB 2 cover metadata convention
     are written for broad reader compatibility.
     """
-    target = resolve_user_path(raw_target, roots=user_accessible_roots(), must_exist=True)
+    target = _resolve_office_target(raw_target)
     if not target.is_file() or target.suffix.lower() != ".epub":
         raise ValueError("EPUB cover insertion requires an existing .epub file.")
     if target.stat().st_size > 100 * 1024 * 1024:
