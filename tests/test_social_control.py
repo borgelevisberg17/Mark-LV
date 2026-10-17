@@ -250,10 +250,31 @@ def test_missing_locator_can_try_next_label_without_claiming_click():
 
 
 def test_message_validation_rejects_control_chars_in_recipient_and_nul_in_message():
-    for recipient, message in [("Alice\\nBob", "Hello"), ("Alice", "Hello\\x00World")]:
+    for recipient, message in [("Alice" + chr(10) + "Bob", "Hello"), ("Alice", "Hello" + chr(0) + "World")]:
         try:
             social._validate_message_request(recipient, message)
         except ValueError:
             pass
         else:
             raise AssertionError("Unsafe input must be rejected before UI interaction")
+
+
+def test_unsupported_open_mode_is_rejected_without_opening_browser():
+    with patch.object(social, "_browser") as browser:
+        result = social.social_control({
+            "platform": "whatsapp",
+            "action": "open",
+            "mode": "unknown",
+        })
+    assert "Unsupported mode" in result
+    browser.assert_not_called()
+
+
+def test_plan_rejects_calls_not_configured_for_platform():
+    result = social.social_control({
+        "platform": "instagram",
+        "action": "plan",
+        "target_action": "start_call",
+        "recipient": "Alice",
+    })
+    assert "not configured" in result
