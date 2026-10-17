@@ -284,7 +284,7 @@ def _desktop_snapshot(platform: dict, recipient: str = "") -> dict:
     controls = _uia_controls(window)
     if not controls:
         raise RuntimeError("The app exposes no readable visible UI controls; no action was taken.")
-    visible_text = "\\n".join(dict.fromkeys(
+    visible_text = "\n".join(dict.fromkeys(
         item["name"] for item in controls if item["name"]
     ))[:_MAX_PAGE_TEXT]
     composer = ""
