@@ -47,7 +47,14 @@ class EdgeExtensionUIDriver:
                 "The existing Edge session is not connected to the Mark-LV bridge. "
                 "Open Edge, enable the Mark-LV bridge extension, and retry."
             )
-        return str(result)
+        value = str(result)
+        if value.startswith((
+            "The Edge extension did not respond",
+            "Could not get page text:",
+            "Bridge error:",
+        )):
+            raise RuntimeError("The local browser UI bridge could not verify the requested result.")
+        return value
 
     def current_url(self) -> str:
         return self._submit("get_url").strip()
