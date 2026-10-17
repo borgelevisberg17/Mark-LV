@@ -5548,6 +5548,13 @@ class MainWindow(QMainWindow):
 
     def _on_wake_install_done(self, ok: bool, msg: str):
         self._log_sig.emit(f"SYS: {'Wake word ready.' if ok else 'Wake word setup failed: ' + msg}")
+        if ok and self.on_wake_toggle:
+            try:
+                result = self.on_wake_toggle(True)
+                if result != "enabled":
+                    self._log_sig.emit("SYS: Wake word files are installed, but detection did not start. It remains disabled.")
+            except Exception as exc:
+                self._log_sig.emit(f"SYS: Wake word could not be enabled: {exc}")
         self._refresh_wake_btns()
 
     def _tap_wake_manual(self):
