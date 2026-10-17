@@ -708,6 +708,10 @@ def _active_word_edit(params: dict) -> str:
             raise ValueError("Replacement strings are limited to 10,000 characters.")
         if old == new:
             return "No change requested: old_text and new_text are identical."
+        if saved_path is None or not saved_path.exists():
+            raise RuntimeError(
+                "The active document has no verified saved path. Save it in Word first; no replacement was made."
+            )
         before = str(document.Content.Text)
         expected = before.count(old)
         if expected == 0:
@@ -727,10 +731,6 @@ def _active_word_edit(params: dict) -> str:
         after = str(document.Content.Text)
         if after == before:
             return "Word reported no effective replacement; the active document was not saved."
-        if saved_path is None or not saved_path.exists():
-            raise RuntimeError(
-                "The active document has no verified saved path. Save it in Word first; changes were not saved by this action."
-            )
         document.Save()
         remaining = after.count(old)
         return (
