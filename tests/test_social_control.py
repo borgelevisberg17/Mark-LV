@@ -147,8 +147,8 @@ def test_desktop_send_requires_message_in_history_and_cleared_composer():
         "message_composer_text": "",
         "visible_controls": [],
     }
-    with patch.object(social, "_desktop_prepare_message", return_value="Draft prepared"), \\
-         patch.object(social, "_desktop_click") as click, \\
+    with patch.object(social, "_desktop_prepare_message", return_value="Draft prepared"), \
+         patch.object(social, "_desktop_click") as click, \
          patch.object(social, "_desktop_snapshot", return_value=verified):
         result = social._desktop_send_message(platform, "Alice", "Hello")
     assert "does not prove server receipt" in result
@@ -163,8 +163,8 @@ def test_desktop_send_fails_if_text_remains_in_composer():
         "message_composer_text": "Hello",
         "visible_controls": [],
     }
-    with patch.object(social, "_desktop_prepare_message", return_value="Draft prepared"), \\
-         patch.object(social, "_desktop_click"), \\
+    with patch.object(social, "_desktop_prepare_message", return_value="Draft prepared"), \
+         patch.object(social, "_desktop_click"), \
          patch.object(social, "_desktop_snapshot", return_value=still_draft):
         try:
             social._desktop_send_message(platform, "Alice", "Hello")
