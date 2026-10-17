@@ -89,16 +89,21 @@ class PluginRegistry:
         return rec.scheduling if rec else None
 
     # -- called by main.py from _execute_tool's else branch --
-    def run(self, name: str, parameters: dict, player=None, session_memory=None) -> str:
+    def run(self, name: str, parameters: dict, player=None, session_memory=None,
+            invocation_id: str = "") -> str:
         rec = self._plugins.get(name)
         if rec is None or not rec.valid:
             return f"Plugin '{name}' is not available."
         if not get_plugin_enabled(name):
             return f"The '{name}' plugin is currently disabled."
+        if not isinstance(parameters, dict):
+            return f"Plugin '{name}' received invalid parameters: expected an object."
         started = time.monotonic()
         self._logger(f"Plugin operation started: {name}; permissions={','.join(rec.permissions) or 'none'}")
         try:
-            result = _call_run(rec.run, parameters, player, session_memory) or "Done."
+            from core.confirm import invocation_scope
+            with invocation_scope(invocation_id):
+                result = _call_run(rec.run, parameters, player, session_memory) or "Done."
             self._logger(f"Plugin operation completed: {name}; duration_ms={round((time.monotonic()-started)*1000)}; permissions={','.join(rec.permissions) or 'none'}")
             return result
         except Exception as e:

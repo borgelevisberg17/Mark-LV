@@ -1,5 +1,6 @@
 import platform as _platform
 import subprocess as _subprocess
+import uuid as _uuid
 
 # ── Nuclear: force CREATE_NO_WINDOW on EVERY subprocess call on Windows ───────
 # This patches Popen itself, so no per-file flag is needed anywhere.
@@ -550,6 +551,7 @@ def _is_live_goaway_error(exc: BaseException) -> bool:
 class JarvisLive:
     def __init__(self, ui: JarvisUI):
         self.ui             = ui
+        self._tool_invocation_session = _uuid.uuid4().hex
         self._asst_name     = "JARVI    S"   # updated each session from config
         self.session              = None
         self.audio_in_queue       = None
@@ -646,7 +648,10 @@ class JarvisLive:
             notify=lambda msg: self.ui.write_log(f"SYS: {msg}"),
         )
         self.ui.get_plugins = self._plugin_registry.list_for_ui
-        self.ui.get_plugin_settings = self._plugin_registry.settings_schemas  # ⚙ settings tab
+        def _settings_sections():
+            from core.github_connection import settings_schema as _github_settings
+            return self._plugin_registry.settings_schemas() + [_github_settings()]
+        self.ui.get_plugin_settings = _settings_sections  # ⚙ settings tab + GitHub connection
         self.ui.request_say = self.plugin_say   # plugins: mid-task speech channel
 
         # ── Wake word ────────────────────────────────────────────────────────
@@ -1263,7 +1268,8 @@ class JarvisLive:
                     args["file_path"] = self.ui.current_file
                 _ctx = {"player": self.ui, "speak": self.speak,
                         "response": None, "session_memory": None,
-                        "dashboard": self._dashboard, "event_loop": loop}
+                        "dashboard": self._dashboard, "event_loop": loop,
+                        "invocation_id": f"{self._tool_invocation_session}:{getattr(fc, 'id', '') or ''}"}
                 r = await loop.run_in_executor(None, lambda: self._action_registry.run(name, args, _ctx))
                 result = r or "Done."
                 # web_search: mirror results to the on-screen content panel
@@ -1279,7 +1285,12 @@ class JarvisLive:
                 if self._plugin_registry.has(name):
                     r = await loop.run_in_executor(
                         None,
-                        lambda: self._plugin_registry.run(name, args, player=self.ui, session_memory=None)
+                        lambda: self._plugin_registry.run(
+                            name, args, player=self.ui, session_memory=None,
+                            invocation_id=(
+                                f"{self._tool_invocation_session}:{getattr(fc, 'id', '') or ''}"
+                            ),
+                        )
                     )
                     result = r or "Done."
                 else:
@@ -1577,6 +1588,11 @@ class JarvisLive:
                                 self._last_out_logged = ""   # new exchange
                                 self.ui.write_log(f"You: {full_in}")
                                 self._session_log.append(f"User: {full_in}")
+                                # Only a standalone, explicit phrase can resolve
+                                # an already-visible confirmation. Ordinary
+                                # speech and a bare "yes" remain normal input.
+                                if confirm_gate.resolve_voice(full_in):
+                                    self.ui.write_log("SYS: Confirmation resolved by voice.")
                                 if self._dashboard:
                                     asyncio.create_task(self._dashboard.broadcast({
                                         "type": "log", "speaker": "user",

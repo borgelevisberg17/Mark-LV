@@ -97,13 +97,28 @@ def _gemini_search(query: str) -> str:
         raise
 
     text = ""
-    for part in response.candidates[0].content.parts:
+    candidate = response.candidates[0]
+    for part in candidate.content.parts:
         if hasattr(part, "text") and part.text:
             text += part.text
 
     text = text.strip()
     if not text:
         raise ValueError("Gemini returned an empty response.")
+    # Preserve grounding links so research consumers can inspect the actual
+    # pages behind a summary instead of treating generated prose as a source.
+    sources = []
+    metadata = getattr(candidate, "grounding_metadata", None)
+    for chunk in getattr(metadata, "grounding_chunks", []) or []:
+        web = getattr(chunk, "web", None)
+        uri = str(getattr(web, "uri", "") or "").strip()
+        title = str(getattr(web, "title", "") or "").strip()
+        if uri.startswith("https://") and uri not in sources:
+            sources.append((uri, title))
+    if sources:
+        text += "\n\nSources:\n" + "\n".join(
+            f"- {title + ': ' if title else ''}{uri}" for uri, title in sources[:12]
+        )
     return text
 
 

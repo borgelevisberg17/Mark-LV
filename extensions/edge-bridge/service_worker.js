@@ -27,6 +27,27 @@ async function activeTab() {
   return tab;
 }
 
+async function navigateAndVerify(tab, url) {
+  const completed = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      chrome.tabs.onUpdated.removeListener(listener);
+      reject(new Error("Navigation timed out before Edge finished loading the page."));
+    }, 20000);
+    const listener = (tabId, changeInfo, updatedTab) => {
+      if (tabId !== tab.id || changeInfo.status !== "complete") return;
+      clearTimeout(timer);
+      chrome.tabs.onUpdated.removeListener(listener);
+      resolve(updatedTab);
+    };
+    chrome.tabs.onUpdated.addListener(listener);
+  });
+  await chrome.tabs.update(tab.id, {url});
+  const updated = await completed;
+  if (!updated.url || new URL(updated.url).origin !== new URL(url).origin)
+    throw new Error("Edge loaded a different destination than requested.");
+  return updated.url;
+}
+
 function executeOnPage(action, p) {
   const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
   const findByText = (selector, text) => [...document.querySelectorAll(selector)]
@@ -200,16 +221,19 @@ async function perform(command) {
     if (action === "search") url = ({google:"https://www.google.com/search?q=",bing:"https://www.bing.com/search?q=",duckduckgo:"https://duckduckgo.com/?q="}[p.engine] || "https://www.google.com/search?q=") + encodeURIComponent(p.query || "");
     if (!/^https?:\/\//i.test(url)) url = "https://" + url;
     if (action === "new_tab") {
-      const tab = await chrome.tabs.create({url, active:true});
-      return "Opened new tab: " + (tab.url || url);
+      const tab = await chrome.tabs.create({url:"about:blank", active:true});
+      if (!tab.id) throw new Error("Edge could not create the requested tab.");
+      const destination = await navigateAndVerify(tab, url);
+      return "Opened new tab: " + destination;
     }
     const tab = await activeTab();
-    await chrome.tabs.update(tab.id, {url});
-    return "Navigated existing Edge tab to " + url;
+    const destination = await navigateAndVerify(tab, url);
+    return "Navigated existing Edge tab to " + destination;
   }
   if (action === "whatsapp" && String(p.operation || "") === "open") {
-    const tab = await chrome.tabs.create({url:"https://web.whatsapp.com/", active:true});
-    return "Opened WhatsApp Web in Edge. Sign in there if needed, then ask Mark-LV to check WhatsApp status.";
+    const tab = await chrome.tabs.create({url:"about:blank", active:true});
+    const destination = await navigateAndVerify(tab, "https://web.whatsapp.com/");
+    return "Opened WhatsApp Web in Edge: " + destination + ". Sign in there if needed, then ask Mark-LV to check status.";
   }
   if (action === "reload" || action === "close_tab") {
     const tab = await activeTab();

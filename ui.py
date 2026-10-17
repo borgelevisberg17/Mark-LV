@@ -1976,7 +1976,7 @@ class ConfirmBanner(_HudOverlay):
     tool round trips on every power command."""
 
     answered = pyqtSignal(bool)
-    _OW = 430
+    _OW = 520
 
     def __init__(self, title: str, detail: str, parent=None):
         super().__init__(parent)
@@ -2006,11 +2006,31 @@ class ConfirmBanner(_HudOverlay):
         lay.addWidget(ttl)
 
         if detail:
+            detail_scroll = QScrollArea()
+            detail_scroll.setWidgetResizable(True)
+            detail_scroll.setMaximumHeight(300)
+            detail_scroll.setMinimumHeight(120)
+            detail_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            detail_scroll.setStyleSheet(
+                f"QScrollArea {{ border: 1px solid {C.BORDER}; background: transparent; }}"
+            )
+            detail_panel = QWidget()
+            detail_layout = QVBoxLayout(detail_panel)
+            detail_layout.setContentsMargins(8, 6, 8, 6)
             dtl = QLabel(detail)
             dtl.setWordWrap(True)
+            dtl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             dtl.setFont(QFont("Courier New", 8))
             dtl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
-            lay.addWidget(dtl)
+            detail_layout.addWidget(dtl)
+            detail_scroll.setWidget(detail_panel)
+            lay.addWidget(detail_scroll)
+
+        voice_hint = QLabel('Voz: diga “CONFIRMO” ou “PODE EXECUTAR”; para recusar, “CANCELA”.')
+        voice_hint.setWordWrap(True)
+        voice_hint.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+        voice_hint.setStyleSheet(f"color: {C.ACC2}; background: transparent;")
+        lay.addWidget(voice_hint)
 
         row = QHBoxLayout(); row.setSpacing(8)
 
@@ -2468,6 +2488,7 @@ class PluginSettingsOverlay(QWidget):
     """
 
     _test_done = pyqtSignal(str, bool, str)   # namespace, ok, message
+    _test_progress = pyqtSignal(str, str)     # namespace, progress text
     _OW = 460
 
     def __init__(self, sections: list[dict], parent=None):
@@ -2485,6 +2506,7 @@ class PluginSettingsOverlay(QWidget):
         self._types:   dict[tuple, str]    = {}     # (namespace, key) -> field type
         self._status_labels: dict[str, QLabel] = {} # namespace -> status QLabel
         self._test_done.connect(self._on_test_done)
+        self._test_progress.connect(self._on_test_progress)
 
         self._fs = (f"QLineEdit {{ background: #000d12; color: {C.TEXT}; "
                     f"border: 1px solid {C.BORDER}; border-radius: 3px; padding: 4px 8px; }}"
@@ -2565,6 +2587,9 @@ class PluginSettingsOverlay(QWidget):
 
         form.addSpacing(4)
         form.addWidget(self._lbl(title, 10, True, C.PRI))
+        description = sec.get("description")
+        if isinstance(description, str) and description.strip():
+            form.addWidget(self._lbl(description.strip(), 8, color=C.TEXT_DIM))
 
         for field in fields:
             if not isinstance(field, dict) or not field.get("key"):
@@ -2612,9 +2637,14 @@ class PluginSettingsOverlay(QWidget):
             self._types[(ns, key)]   = ftype
             form.addWidget(w)
 
-        # optional test/connect action button + status line
-        action = sec.get("action")
-        if isinstance(action, dict) and callable(action.get("run")):
+        # Optional one-or-many action buttons; older plugin sections keep `action`.
+        actions = sec.get("actions")
+        if not isinstance(actions, list):
+            action = sec.get("action")
+            actions = [action] if isinstance(action, dict) else []
+        for action in actions:
+            if not isinstance(action, dict) or not callable(action.get("run")):
+                continue
             form.addSpacing(2)
             ab = QPushButton(str(action.get("label") or "TEST"))
             ab.setFixedHeight(30)
@@ -2625,7 +2655,7 @@ class PluginSettingsOverlay(QWidget):
                     border: 1px solid {C.PRI_DIM}; border-radius: 3px; }}
                 QPushButton:hover {{ background: {C.PRI_GHO}; border-color: {C.PRI}; }}
             """)
-            ab.clicked.connect(lambda _=False, n=ns: self._run_action(n))
+            ab.clicked.connect(lambda _=False, n=ns, a=action: self._run_action(n, a))
             form.addWidget(ab)
 
         status = self._lbl("", 8, color=C.TEXT_DIM)
@@ -2675,12 +2705,13 @@ class PluginSettingsOverlay(QWidget):
                     lbl.setText("Saved ✓")
                     lbl.setStyleSheet(f"color: {C.PRI}; background: transparent;")
 
-    def _run_action(self, ns: str):
+    def _run_action(self, ns: str, selected_action: dict | None = None):
         sec = next((s for s in self._sections
                     if (s.get("namespace") or s.get("plugin")) == ns), None)
         if not sec:
             return
-        run_fn = (sec.get("action") or {}).get("run")
+        action_cfg = selected_action or sec.get("action") or {}
+        run_fn = action_cfg.get("run")
         if not callable(run_fn):
             return
         self._save_ns(ns)                 # persist what the user typed before testing
@@ -2692,7 +2723,10 @@ class PluginSettingsOverlay(QWidget):
 
         def worker():
             try:
-                res = run_fn(values)
+                if action_cfg.get("progress"):
+                    res = run_fn(values, progress=lambda text: self._test_progress.emit(ns, str(text)))
+                else:
+                    res = run_fn(values)
                 if isinstance(res, tuple) and len(res) == 2:
                     ok, msg = bool(res[0]), str(res[1])
                 else:
@@ -2708,8 +2742,15 @@ class PluginSettingsOverlay(QWidget):
         if not lbl:
             return
         lbl.setText(msg)
-        color = C.PRI if ok else "#ff6b6b"
+        pending = "CONFIRMATION_PENDING" in msg or "status=awaiting_confirmation" in msg
+        color = ("#f2b84b" if pending else (C.PRI if ok else "#ff6b6b"))
         lbl.setStyleSheet(f"color: {color}; background: transparent;")
+
+    def _on_test_progress(self, ns: str, msg: str):
+        lbl = self._status_labels.get(ns)
+        if lbl:
+            lbl.setText(msg[:500])
+            lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
 
 
 class RemoteKeyOverlay(QWidget):
@@ -5951,7 +5992,7 @@ class JarvisUI:
     def show_confirm(self, title: str, detail: str) -> None:
         """Thread-safe: raise the irreversible-action gate. Called from action
         handlers running in executor threads, so it goes through a signal."""
-        self._win._confirm_sig.emit(str(title)[:120], str(detail)[:300])
+        self._win._confirm_sig.emit(str(title)[:160], str(detail)[:12000])
 
     def hide_confirm(self) -> None:
         """Thread-safe: take the gate down."""

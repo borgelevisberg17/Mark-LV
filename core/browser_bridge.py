@@ -166,7 +166,10 @@ class BrowserBridge:
                 self._prune()
                 entry = self._results.pop(command_id, None)
             if entry:
-                return entry[1].get("result", "")
+                result = entry[1].get("result", "")
+                if not entry[1].get("ok", True):
+                    return f"Bridge error: {result or 'The Edge extension could not complete the command.'}"
+                return result
             time.sleep(0.1)
         return "The Edge extension did not respond in time. Check that Mark-LV Bridge is enabled in Edge."
 

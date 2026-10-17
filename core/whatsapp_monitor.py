@@ -77,6 +77,7 @@ def check_for_message(monitor: dict) -> str | None:
     old_unread_count = int(monitor.get("last_unread_count", 1 if monitor.get("last_unread") else 0))
     notify = unread and (
         unread_count > old_unread_count
+        or current_hash != old_hash
         or (old_unread_count == 0 and monitor.get("last_unread") is not True)
     )
     updated = {

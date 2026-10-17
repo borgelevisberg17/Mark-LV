@@ -1,6 +1,8 @@
 import os
 import shutil
 import platform
+import json
+import hashlib
 from pathlib import Path
 from datetime import datetime
 
@@ -650,7 +652,7 @@ def get_file_info(path: str, name: str = "") -> str:
     except Exception as e:
         return f"Could not get file info: {e}"
 
-def file_controller(
+def _file_controller_execute(
     parameters: dict = None,
     response=None,
     player=None,
@@ -726,10 +728,57 @@ def file_controller(
         return f"File controller error ({action}): {e}"
 
 
+_MUTATING_FILE_ACTIONS = {
+    "create_file", "create_folder", "delete", "move", "copy", "rename",
+    "write", "organize_desktop",
+}
+
+
+def file_controller(parameters: dict = None, response=None, player=None,
+                    session_memory=None) -> str:
+    """Require a human approval before changing files or folders."""
+    if not isinstance(parameters, dict):
+        return "Invalid file request: parameters must be an object."
+    params = parameters
+    raw_action = params.get("action", "")
+    if not isinstance(raw_action, str):
+        return "Invalid file request: action must be text."
+    action = raw_action.strip().lower()
+    if action not in _MUTATING_FILE_ACTIONS:
+        return _file_controller_execute(params, response, player, session_memory)
+
+    from core.execution import request_execution
+
+    # Do not put file contents in the confirmation banner or audit key. The
+    # digest still makes retries of different payloads distinct.
+    payload = json.dumps(params, sort_keys=True, ensure_ascii=False, default=str)
+    fingerprint = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    target = str(params.get("path", "desktop"))
+    name = str(params.get("name", ""))
+    destination = str(params.get("destination", ""))
+    detail = f"Action: {action}. Path: {target}"
+    if name:
+        detail += f"; item: {name}"
+    if destination:
+        detail += f"; destination: {destination}"
+    if action in {"create_file", "write"}:
+        detail += "; content will be written (content omitted from this preview)."
+    return request_execution(
+        key="file_controller:" + action,
+        title=f"{action.replace('_', ' ').capitalize()} file operation",
+        detail=detail,
+        fingerprint=fingerprint,
+        category="filesystem",
+        permissions=("filesystem.write",),
+        player=player,
+        operation=lambda: _file_controller_execute(params, response, player, session_memory),
+    )
+
+
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
 TOOL = {
     "name": "file_controller",
-    "description": "Manages files and folders: list, create, delete, move, copy, rename, read, write, find, disk usage.",
+    "description": "Manages files and folders: list, create, delete, move, copy, rename, read, write, find, disk usage. File and folder changes require explicit on-screen or spoken approval before execution.",
     "parameters": {
         "type": "OBJECT",
         "properties": {

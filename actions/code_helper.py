@@ -410,7 +410,7 @@ Optimize the following code for:
 Return ONLY the optimized code — no explanation, no markdown, no backticks.
 
 Original code:
-{code[:6000]}
+{code}
 
 Optimized code:"""
 
@@ -556,6 +556,65 @@ def code_helper(
         action = _detect_intent(description, file_path, code)
         print(f"[Code] 🤖 Auto-detected: {action}")
 
+    if action not in _VALID_INTENTS:
+        return f"Unknown action: '{action}'. Use write, edit, explain, run, build, optimize, or screen_debug."
+
+    if action in {"write", "build"} and not description:
+        return "Describe what you want built before I prepare a coding request for approval."
+    if action == "edit" and (not file_path or not (description or p.get("instruction", "").strip())):
+        return "Editing requires the target file and the exact change you want."
+    if action == "run" and not file_path:
+        return "Running requires the path of the file you want executed."
+    if action == "optimize" and not (file_path or code):
+        return "Optimization requires a file path or the code to optimize."
+    if action == "explain" and not (file_path or code):
+        return "Explanation requires a file path or the code to explain."
+
+    if action != "explain":
+        target = file_path or str(_resolve_save_path(output_path, language))
+        operations = {
+            "write": "Generate code and save a new file",
+            "edit": "Ask the coding model to rewrite the specified file",
+            "run": "Execute the specified local file",
+            "build": "Generate code, save it, run it and apply up to three automatic fixes",
+            "optimize": "Rewrite and save the specified code",
+            "screen_debug": "Capture the screen and analyze it; a detected fix may rewrite the specified file",
+        }
+        detail = (
+            f"Action: {operations[action]}\nTarget: {target}\n"
+            f"Request: {(description or '(no description supplied)')[:1200]}\n"
+            f"Language: {language or 'python'}\n"
+            "The coding model will receive the full specified source file or code as context. "
+            "No file will be changed and no program will run unless you approve this request on screen."
+        )
+        from core.execution import request_execution
+        return request_execution(
+            key=f"code_helper:{action}",
+            title=f"Approve coding action: {action.replace('_', ' ')}",
+            detail=detail,
+            operation=lambda: _perform_action(
+                action, description, language, output_path, file_path, code,
+                args, timeout, speak, player,
+            ),
+            player=player,
+            category="desktop",
+            permissions=("filesystem", "process") if action in {"run", "build"} else ("filesystem",),
+            fingerprint=__import__("hashlib").sha256(
+                json.dumps([action, description, language, output_path, file_path, code, args, timeout],
+                           ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+            ).hexdigest(),
+        )
+
+    return _perform_action(
+        action, description, language, output_path, file_path, code,
+        args, timeout, speak, player,
+    )
+
+
+def _perform_action(action, description, language, output_path, file_path, code,
+                    args, timeout, speak, player) -> str:
+    """Run a code-helper operation after its caller's approval gate."""
+
     if action == "write":
         return _write_action(description, language, output_path, player)
 
@@ -581,8 +640,7 @@ def code_helper(
     elif action == "screen_debug":
         return _screen_debug_action(description, file_path, player, speak)
 
-    else:
-        return f"Unknown action: '{action}'. Use write, edit, explain, run, build, optimize, or screen_debug."
+    return f"Unknown action: '{action}'. Use write, edit, explain, run, build, optimize, or screen_debug."
 
 
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
@@ -594,7 +652,7 @@ TOOL = {
         "properties": {
             "action": {
                 "type": "STRING",
-                "description": "write | edit | explain | run | build | auto (default: auto)"
+                "description": "write | edit | explain | run | build | optimize | screen_debug | auto (default: auto). Saving, editing, building or running code requires your on-screen approval."
             },
             "description": {
                 "type": "STRING",

@@ -24,6 +24,7 @@ class ActionExecutionSecurityTests(unittest.TestCase):
             "actions/computer_settings.py",
             "actions/dev_agent.py",
             "core/execution.py",
+            "dashboard/server.py",
         ):
             with self.subTest(path=relative):
                 tree = ast.parse(_read(relative), filename=relative)
@@ -66,7 +67,7 @@ class ActionExecutionSecurityTests(unittest.TestCase):
         self.assertIn("run_python_file", calls)
         self.assertNotIn("subprocess", calls)
 
-    def test_dev_agent_execution_and_recovery_use_central_engine(self):
+    def test_dev_agent_execution_uses_central_engine_without_unapproved_recovery(self):
         source = _read("actions/dev_agent.py")
         tree = ast.parse(source, filename="actions/dev_agent.py")
         build = _function(tree, "_build_project")
@@ -83,11 +84,16 @@ class ActionExecutionSecurityTests(unittest.TestCase):
             else ""
             for node in ast.walk(workflow) if isinstance(node, ast.Call)
         }
-        self.assertIn("_install_dependencies", workflow_calls)
+        self.assertIn("_ensure_runtime_dependencies", workflow_calls)
         self.assertIn("_run_project", workflow_calls)
-        self.assertIn("_try_auto_install", workflow_calls)
-        self.assertIn("run_project_command", source)
+        self.assertNotIn("_try_auto_install", workflow_calls)
+        self.assertNotIn("_fix_files", workflow_calls)
+        self.assertIn("run_sandboxed_project_command", source)
         self.assertIn("install_dependencies", source)
+        runtime_setup = _function(tree, "_ensure_runtime_dependencies")
+        runtime_calls = {node.func.id for node in ast.walk(runtime_setup)
+                         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)}
+        self.assertIn("_install_dependencies", runtime_calls)
 
     def test_execution_engine_enforces_limits_and_avoids_shell(self):
         source = _read("core/execution.py")
@@ -115,6 +121,19 @@ class ActionExecutionSecurityTests(unittest.TestCase):
         self.assertEqual(parse_command("python main.py"), ["python", "main.py"])
         with self.assertRaises(ExecutionPolicyError):
             parse_command("")
+
+    def test_action_dispatch_rejects_non_object_parameters(self):
+        from core.action_loader import ActionRecord, ActionRegistry
+
+        calls = []
+        registry = ActionRegistry({
+            "probe": ActionRecord(
+                name="probe", handler=lambda **kwargs: calls.append(kwargs) or "ran",
+                valid=True,
+            ),
+        }, logger=lambda _message: None)
+        self.assertIn("expected an object", registry.run("probe", ["wrong"]))
+        self.assertEqual(calls, [])
 
     def test_generated_python_runs_in_timed_child_process(self):
         from core.execution import run_python_code

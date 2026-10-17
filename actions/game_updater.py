@@ -6,6 +6,7 @@ import json
 import time
 import subprocess
 import threading
+import hashlib
 from pathlib import Path
 from datetime import datetime
 
@@ -934,7 +935,7 @@ def _get_schedule_status() -> str:
         return "No scheduled game update found."
 
 
-def game_updater(parameters: dict, player=None, speak=None) -> str:
+def _game_updater_execute(parameters: dict, player=None, speak=None) -> str:
     p         = parameters or {}
     action    = p.get("action",    "update").lower().strip()
     platform  = p.get("platform",  "both").lower().strip()
@@ -1052,17 +1053,77 @@ def game_updater(parameters: dict, player=None, speak=None) -> str:
     return f"Unknown action: '{action}'."
 
 
+def game_updater(parameters: dict, player=None, speak=None) -> str:
+    """Gate installs, updates, scheduler changes, and deferred shutdown."""
+    from core.execution import request_execution
+
+    if not isinstance(parameters, dict):
+        return "Invalid game updater request: parameters must be an object."
+    params = dict(parameters)
+    action = params.get("action", "update")
+    if not isinstance(action, str):
+        return "Invalid game updater request: action must be text."
+    action = action.strip().lower()
+    params["action"] = action
+    if action not in {"update", "install", "list", "download_status",
+                      "schedule", "cancel_schedule", "schedule_status"}:
+        return f"Unknown action: '{action}'."
+    try:
+        hour = int(params.get("hour", 3))
+        minute = int(params.get("minute", 0))
+    except (TypeError, ValueError):
+        return "Invalid schedule time: hour and minute must be integers."
+    if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+        return "Invalid schedule time: hour must be 0–23 and minute 0–59."
+    params["hour"], params["minute"] = hour, minute
+    platform_name = params.get("platform", "both")
+    if not isinstance(platform_name, str) or platform_name.strip().lower() not in {"steam", "epic", "both"}:
+        return "Invalid platform: choose steam, epic, or both."
+    params["platform"] = platform_name.strip().lower()
+    for key in ("game_name", "app_id"):
+        value = params.get(key)
+        if value is not None and not isinstance(value, str):
+            return f"Invalid game updater request: {key} must be text."
+        if isinstance(value, str):
+            params[key] = value.strip()
+
+    shutdown = str(params.get("shutdown_when_done", "false")).strip().lower() in {"true", "1", "yes"}
+    needs_approval = action in {"install", "update", "schedule", "cancel_schedule"} or shutdown
+    if not needs_approval:
+        return _game_updater_execute(params, player, speak)
+
+    payload = json.dumps(params, sort_keys=True, ensure_ascii=False, default=str)
+    fingerprint = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    game = str(params.get("game_name") or "all installed games")
+    detail = (f"Action: {action}; platform: {params['platform']}; game: {game}. "
+              f"Daily schedule time: {hour:02d}:{minute:02d}. "
+              f"Shutdown when complete: {'yes' if shutdown else 'no'}.")
+    return request_execution(
+        key=f"game_updater:{action}",
+        title="Confirm game updater operation",
+        detail=detail,
+        fingerprint=fingerprint,
+        category="general",
+        permissions=("games.write", "system.shutdown") if shutdown else ("games.write",),
+        player=player,
+        operation=lambda: _game_updater_execute(params, player, speak),
+    )
+
+
 if __name__ == "__main__":
     if "--scheduled" in sys.argv:
         print(f"[GameUpdater] 🕐 Scheduled run at {datetime.now().strftime('%H:%M')}")
-        result = game_updater({"action": "update", "platform": "both"})
+        # A user explicitly approved creation of this recurring task. The
+        # scheduled process has no interactive confirmation UI, so execute the
+        # already-authorized update path directly.
+        result = _game_updater_execute({"action": "update", "platform": "both"})
         print(f"[GameUpdater] ✅ {result}")
 
 
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
 TOOL = {
     "name": "game_updater",
-    "description": "THE ONLY tool for ANY Steam or Epic Games request. Use for: installing, downloading, updating games, listing installed games, checking download status, scheduling updates. ALWAYS call directly for any Steam/Epic/game request. NEVER use browser_control or web_search for Steam/Epic.",
+    "description": "THE ONLY tool for ANY Steam or Epic Games request. Use for installing, downloading, updating games, listing installed games, checking download status, and scheduling updates. Installs, updates, schedule changes, and requested shutdown-after-download require explicit on-screen or spoken approval before execution. ALWAYS call directly for any Steam/Epic/game request. NEVER use browser_control or web_search for Steam/Epic.",
     "parameters": {
         "type": "OBJECT",
         "properties": {

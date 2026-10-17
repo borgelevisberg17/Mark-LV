@@ -1076,6 +1076,10 @@ def browser_control(
     try:
         bridged = _try_existing_edge(action, browser, params)
         if bridged is not None:
+            if str(bridged).startswith("Bridge error:"):
+                result = str(bridged)
+                _log(player, result)
+                return result
             _log(player, bridged)
             return bridged
     except Exception as e:

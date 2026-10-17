@@ -100,8 +100,15 @@ class ActionRegistry:
         rec = self._actions.get(name)
         if rec is None or not rec.valid:
             return f"Action '{name}' is not available."
+        if not isinstance(parameters, dict):
+            return f"Action '{name}' received invalid parameters: expected an object."
+        if ctx is not None and not isinstance(ctx, dict):
+            return f"Action '{name}' received invalid context."
         try:
-            return _call_handler(rec.handler, parameters, ctx or {}) or "Done."
+            call_context = ctx or {}
+            from core.confirm import invocation_scope
+            with invocation_scope(call_context.get("invocation_id", "")):
+                return _call_handler(rec.handler, parameters, call_context) or "Done."
         except Exception as e:
             self._logger(f"Action '{name}' crashed during run(): {e}")
             traceback.print_exc()

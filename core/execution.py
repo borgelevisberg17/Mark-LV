@@ -1,14 +1,15 @@
 """Central policy and execution engine for side-effecting actions.
 
-Human approval is explicit and happens through core.confirm; ordinary assistant
-operations remain available. This is consent + process management, not an OS
-sandbox: approved code still runs with the current user's permissions.
+Human approval is explicit and happens through core.confirm. Generated project
+commands and dependency installs use the constrained Docker runner below; the
+other child-process helpers may still run with the current user's permissions.
 """
 from __future__ import annotations
 
 import os
 import hashlib
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -101,7 +102,9 @@ def _validate_timeout(timeout: int | float | None, category: str = "general") ->
     return value
 
 
-def _run_process(argv: Sequence[str], cwd: Path, timeout: int) -> str:
+def _run_process(argv: Sequence[str], cwd: Path, timeout: int,
+                 on_terminate: Callable[[], None] | None = None,
+                 include_exit_status: bool = False) -> str:
     if not argv or not argv[0]:
         raise ExecutionPolicyError("An executable command is required.")
     if len(argv) > 64 or any(not isinstance(arg, str) or len(arg) > 4096 for arg in argv):
@@ -134,13 +137,19 @@ def _run_process(argv: Sequence[str], cwd: Path, timeout: int) -> str:
             except (TimeoutError, ExecutionPolicyError):
                 process.kill()
                 process.wait()
+                if on_terminate:
+                    try:
+                        on_terminate()
+                    except Exception:
+                        pass
                 raise
         output = stdout_path.read_bytes()[:MAX_OUTPUT_CHARS].decode("utf-8", "replace")
         error = stderr_path.read_bytes()[:MAX_OUTPUT_CHARS].decode("utf-8", "replace")
     combined = (output + ("\n" + error if error else "")).strip()
     if return_code:
         return f"Process exited with code {return_code}.\n{combined}"[:MAX_OUTPUT_CHARS]
-    return combined or "Process completed successfully with no output."
+    success = combined or "Process completed successfully with no output."
+    return f"Process exited with code 0.\n{success}" if include_exit_status else success
 
 
 def run_python_file(path: str | Path, timeout: int | float | None = None) -> str:
@@ -220,30 +229,179 @@ def parse_command(command: str) -> list[str]:
     return argv
 
 
+_SANDBOX_IMAGES = {
+    "python": "python:3.12-slim",
+    "py": "python:3.12-slim",
+    "javascript": "node:22-slim",
+    "typescript": "node:22-slim",
+    "js": "node:22-slim",
+    "ts": "node:22-slim",
+    "node": "node:22-slim",
+}
+
+
+def docker_sandbox_status(timeout: int = 4) -> tuple[bool, str]:
+    """Check for an available Docker daemon without changing machine state."""
+    docker = shutil.which("docker")
+    if not docker:
+        return False, "Docker CLI was not found. Install Docker Desktop to run projects in a sandbox."
+    try:
+        result = subprocess.run(
+            [docker, "info", "--format", "{{.ServerVersion}}"],
+            capture_output=True, text=True, timeout=max(1, min(int(timeout), 10)),
+            shell=False, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, f"Docker sandbox is unavailable: {exc}"
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "Docker daemon is not running.").strip()
+        return False, f"Docker sandbox is unavailable: {detail[:400]}"
+    return True, f"Docker sandbox ready (engine {result.stdout.strip() or 'available'})."
+
+
+def _docker_stop(docker: str, cid_file: Path) -> None:
+    try:
+        container_id = cid_file.read_text(encoding="ascii").strip()
+        if container_id:
+            subprocess.run(
+                [docker, "stop", "--time", "1", container_id],
+                capture_output=True, timeout=5, shell=False, check=False,
+            )
+    except (OSError, UnicodeError, subprocess.TimeoutExpired):
+        pass
+
+
+def _run_in_docker(command: Sequence[str], project_dir: str | Path, *,
+                   language: str, timeout: int | float | None,
+                   network: bool = False, pythonpath: bool = False,
+                   image_override: str | None = None) -> str:
+    """Run only the requested project directory in a constrained container.
+
+    Runtime containers have no network, no Linux capabilities, a read-only root
+    filesystem, bounded memory/CPU/PIDs, and a single writable project mount.
+    Dependency installation opts into network access but keeps the same limits.
+    This requires a running Docker daemon; there is deliberately no host fallback.
+    """
+    docker = shutil.which("docker")
+    if not docker:
+        raise ExecutionPolicyError("Docker is required; refusing to run this project on the host.")
+    image = image_override or _SANDBOX_IMAGES.get(str(language or "").strip().lower())
+    if not image:
+        raise ExecutionPolicyError(f"No sandbox image is configured for language '{language}'.")
+    cwd = resolve_user_path(project_dir, roots=[Path.home()], must_exist=True)
+    if not cwd.is_dir():
+        raise ExecutionPolicyError("Project working directory must be a directory.")
+    if not command or any(not isinstance(arg, str) or not arg for arg in command):
+        raise ExecutionPolicyError("Sandbox command must be a non-empty argument list.")
+
+    timeout_value = _validate_timeout(timeout, "project")
+    with tempfile.TemporaryDirectory(prefix="marklv-docker-") as temp_dir:
+        cid_file = Path(temp_dir) / "container.id"
+        argv = [
+            docker, "run", "--rm", "--pull=missing", "--init",
+            "--network=bridge" if network else "--network=none",
+            "--cap-drop=ALL", "--security-opt=no-new-privileges:true",
+            "--pids-limit=128", "--memory=1g", "--cpus=2",
+            "--read-only", "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=64m",
+            "--cidfile", str(cid_file),
+            "--volume", f"{cwd}:/workspace:rw", "--workdir", "/workspace",
+            "--env", "PYTHONDONTWRITEBYTECODE=1",
+        ]
+        if image_override:
+            argv.extend(["--shm-size=256m"])
+        if pythonpath:
+            argv.extend(["--env", "PYTHONPATH=/workspace/.marklv_site"])
+        argv.extend([image, *command])
+        return _run_process(
+            argv, cwd, timeout_value,
+            on_terminate=lambda: _docker_stop(docker, cid_file),
+            include_exit_status=True,
+        )
+
+
 def run_project_command(command: str, project_dir: str | Path, timeout: int | float | None = None) -> str:
-    """Run a project command without shell interpretation, after caller approval."""
+    """Run a project command on the host after caller approval.
+
+    Kept for explicitly trusted host workflows. New development-agent code must
+    use run_sandboxed_project_command instead.
+    """
     cwd = resolve_user_path(project_dir, roots=[Path.home()], must_exist=True)
     if not cwd.is_dir():
         raise ExecutionPolicyError("Project working directory must be a directory.")
     return _run_process(parse_command(command), cwd, _validate_timeout(timeout, 'project'))
 
 
+def run_sandboxed_project_command(command: str, project_dir: str | Path,
+                                 timeout: int | float | None = None,
+                                 language: str = "python") -> str:
+    """Run a generated project in Docker with runtime networking disabled."""
+    return _run_in_docker(
+        parse_command(command), project_dir, language=language,
+        timeout=timeout, network=False,
+        pythonpath=str(language).lower() in {"python", "py"},
+    )
+
+
+def run_playwright_sandboxed_project_command(command: str, project_dir: str | Path,
+                                              playwright_version: str,
+                                              timeout: int | float | None = None) -> str:
+    """Run approved Playwright E2E checks in a version-matched Chromium container."""
+    import re
+    if not re.fullmatch(r"\d+\.\d+\.\d+", str(playwright_version or "")):
+        raise ExecutionPolicyError("Playwright browser image requires an exact resolved x.y.z package version.")
+    return _run_in_docker(
+        parse_command(command), project_dir, language="node", timeout=timeout,
+        network=False, image_override=f"mcr.microsoft.com/playwright:v{playwright_version}-noble",
+    )
+
+
+def run_playwright_python_sandboxed_project_command(command: str, project_dir: str | Path,
+                                                     playwright_version: str,
+                                                     timeout: int | float | None = None) -> str:
+    """Run Python Playwright/pytest checks in the matching browser image."""
+    import re
+    if not re.fullmatch(r"\d+\.\d+\.\d+", str(playwright_version or "")):
+        raise ExecutionPolicyError("Playwright browser image requires an exact resolved x.y.z package version.")
+    return _run_in_docker(
+        parse_command(command), project_dir, language="python", timeout=timeout,
+        network=False, pythonpath=True,
+        image_override=f"mcr.microsoft.com/playwright/python:v{playwright_version}-noble",
+    )
+
+
 def install_dependencies(dependencies: Sequence[str], project_dir: str | Path,
                          timeout: int | float | None = None,
-                         manager: str = "pip") -> str:
-    """Install declared packages; call only inside an approved operation."""
-    import re
-    import shutil as _shutil
-
+                         manager: str = "pip", language: str | None = None) -> str:
+    """Install packages in an isolated project container after approval."""
     cwd = resolve_user_path(project_dir, roots=[Path.home()], must_exist=True)
     if not cwd.is_dir():
         raise ExecutionPolicyError("Project working directory must be a directory.")
     if not dependencies:
         return "No external dependencies to install."
-    if len(dependencies) > 50:
-        raise ExecutionPolicyError("A maximum of 50 dependencies can be installed per request.")
     if manager not in {"pip", "npm"}:
         raise ExecutionPolicyError("Supported package managers are pip and npm.")
+    packages = validate_dependencies(dependencies)
+    language = language or ("node" if manager == "npm" else "python")
+    if manager == "pip":
+        argv = ["python", "-m", "pip", "install", "--disable-pip-version-check",
+                "--no-cache-dir", "--target=/workspace/.marklv_site", *packages]
+    else:
+        argv = ["npm", "install", "--no-audit", "--no-fund", *packages]
+    return _run_in_docker(
+        argv, cwd, language=language,
+        timeout=_validate_timeout(180 if timeout is None else timeout, "dependency_install"),
+        network=True,
+    )
+
+
+def validate_dependencies(dependencies: Sequence[str]) -> list[str]:
+    """Validate package names before they enter an approval preview."""
+    import re
+
+    if not isinstance(dependencies, (list, tuple)):
+        raise ExecutionPolicyError("Dependencies must be a list of package names.")
+    if len(dependencies) > 50:
+        raise ExecutionPolicyError("A maximum of 50 dependencies can be installed per request.")
     package_pattern = re.compile(r"^@?[A-Za-z0-9][A-Za-z0-9._@/-]{0,99}$")
     packages = []
     for dependency in dependencies:
@@ -254,11 +412,4 @@ def install_dependencies(dependencies: Sequence[str], project_dir: str | Path,
                 or dependency.startswith(("/", "\\\\"))):
             raise ExecutionPolicyError(f"Invalid package name: {dependency!r}")
         packages.append(dependency)
-    if manager == "pip":
-        argv = [sys.executable, "-m", "pip", "install", *packages]
-    else:
-        npm = _shutil.which("npm")
-        if not npm:
-            raise ExecutionPolicyError("npm is not installed or is not available on PATH.")
-        argv = [npm, "install", *packages]
-    return _run_process(argv, cwd, _validate_timeout(180 if timeout is None else timeout, 'dependency_install'))
+    return packages

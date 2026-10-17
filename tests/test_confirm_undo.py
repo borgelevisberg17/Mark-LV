@@ -1,5 +1,6 @@
 import threading
 import unittest
+import uuid
 
 from core import confirm, undo
 
@@ -47,6 +48,50 @@ class ConfirmationAndUndoTests(unittest.TestCase):
         confirm.resolve(False)
         self.assertEqual(first_ran, [])
         self.assertEqual(second_ran, [])
+
+    def test_voice_confirmation_requires_explicit_phrase(self):
+        shown = []
+        completed = threading.Event()
+        confirm.bind(lambda title, detail: shown.append(title), lambda: None)
+        result = confirm.request(
+            "voice-explicit-approval-" + uuid.uuid4().hex, "Write file", "Save a new file",
+            lambda: completed.set() or "saved",
+        )
+        self.assertIn("CONFIRMATION_PENDING", result)
+        self.assertFalse(confirm.resolve_voice("sim"))
+        self.assertFalse(confirm.resolve_voice("pode fazer o jantar"))
+        self.assertTrue(confirm.resolve_voice("Jarvis, autorizo, por favor"))
+        self.assertTrue(completed.wait(2))
+        self.assertEqual(shown, ["Write file"])
+
+    def test_voice_rejection_cancels_pending_action(self):
+        ran = []
+        confirm.bind(lambda _title, _detail: None, lambda: None)
+        confirm.request("voice-explicit-rejection", "Send", "Send message",
+                        lambda: ran.append(True) or "sent")
+        self.assertTrue(confirm.resolve_voice("não confirmo"))
+        self.assertEqual(ran, [])
+
+    def test_operation_dedupes_same_tool_call_but_allows_a_new_call(self):
+        base_key = "repeatable-operation-" + uuid.uuid4().hex
+        completed = threading.Event()
+        shown = []
+        confirm.bind(lambda title, _detail: shown.append(title), lambda: None)
+        with confirm.invocation_scope("tool-call-1"):
+            first = confirm.request(base_key, "Write file", "Save it",
+                                    lambda: completed.set() or "saved")
+        self.assertIn("CONFIRMATION_PENDING", first)
+        confirm.resolve(True)
+        self.assertTrue(completed.wait(2))
+
+        with confirm.invocation_scope("tool-call-1"):
+            duplicate = confirm.request(base_key, "Write file", "Save it", lambda: "duplicate")
+        self.assertIn("status=completed", duplicate)
+        with confirm.invocation_scope("tool-call-2"):
+            deliberate_repeat = confirm.request(base_key, "Write file", "Save it", lambda: "saved again")
+        self.assertIn("CONFIRMATION_PENDING", deliberate_repeat)
+        self.assertEqual(shown, ["Write file", "Write file"])
+        confirm.resolve(False)
 
     def test_undo_reverses_latest_registered_operation(self):
         state = {"value": 1}

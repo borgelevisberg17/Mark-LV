@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import threading
 import time
+import unicodedata
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -26,6 +29,18 @@ _lock = threading.RLock()
 _show_cb: Optional[Callable[[str, str], None]] = None
 _hide_cb: Optional[Callable[[], None]] = None
 _log_cb: Optional[Callable[[str], None]] = None
+_invocation_id: ContextVar[str] = ContextVar("marklv_tool_invocation_id", default="")
+
+
+@contextmanager
+def invocation_scope(invocation_id: str):
+    """Bind confirmation deduplication to one model tool-call ID."""
+    value = str(invocation_id or "")[:200]
+    token = _invocation_id.set(value)
+    try:
+        yield
+    finally:
+        _invocation_id.reset(token)
 
 
 def bind(show, hide, log=None) -> None:
@@ -48,6 +63,12 @@ def request(key: str, title: str, detail: str, run: Callable[[], str],
     global _pending
     if _show_cb is None:
         return f"I cannot confirm '{title}' because the interface is not available; nothing was done."
+    title = str(title)[:160]
+    detail = str(detail)[:12_000]
+
+    invocation_id = _invocation_id.get()
+    if invocation_id:
+        key = f"{key}:invocation:{invocation_id}"
 
     now = time.monotonic()
     with _lock:
@@ -83,7 +104,8 @@ def request(key: str, title: str, detail: str, run: Callable[[], str],
 
     _log(f"SYS: awaiting_confirmation id={operation_id} title={title}")
     return (f"[CONFIRMATION_PENDING] [OPERATION_STATUS] status=awaiting_confirmation operation_id={operation_id}. "
-            f"Confirmation is visible on screen for '{title}'. Ask the user to approve it there; do not claim completion.")
+            f"Confirmation is visible on screen for '{title}'. The user can approve it there or say 'Confirmo' / 'Pode executar'; "
+            "'Cancela' rejects it. Ask them to choose; do not claim completion.")
 
 
 def resolve(accepted: bool) -> None:
@@ -140,6 +162,42 @@ def pending_title() -> str:
         if time.monotonic() - _pending.at > TIMEOUT_SECONDS:
             return ""
         return _pending.title
+
+
+_VOICE_APPROVALS = {
+    "confirmo", "confirmar", "pode confirmar", "pode executar", "autorizo",
+    "eu autorizo", "aprovo", "eu aprovo", "sim autorizo", "sim pode executar",
+    "i confirm", "i approve", "approve", "confirm", "proceed", "yes approve",
+}
+_VOICE_REJECTIONS = {
+    "cancela", "cancelar", "cancelo", "nao", "nao confirmo", "nao autorizo",
+    "recuso", "rejeito", "nega", "negar", "i cancel", "cancel", "no",
+    "i reject", "reject",
+}
+
+
+def resolve_voice(text: str) -> bool:
+    """Resolve a pending action only for a clear, standalone spoken command."""
+    normalized = unicodedata.normalize("NFKD", str(text or "").casefold())
+    normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+    normalized = " ".join("".join(ch if ch.isalnum() else " " for ch in normalized).split())
+    words = normalized.split()
+    if words[:1] in (["jarvis"], ["mark"], ["marklv"]):
+        normalized = " ".join(words[1:])
+    normalized = normalized.removesuffix(" por favor").removesuffix(" please").strip()
+    if normalized.startswith("sim ") and normalized[4:] in _VOICE_APPROVALS:
+        normalized = normalized[4:]
+    if normalized.startswith("yes ") and normalized[4:] in _VOICE_APPROVALS:
+        normalized = normalized[4:]
+    if normalized not in _VOICE_APPROVALS and normalized not in _VOICE_REJECTIONS:
+        return False
+    with _lock:
+        pending = _pending
+        if pending is None or time.monotonic() - pending.at > TIMEOUT_SECONDS:
+            return False
+    resolve(normalized in _VOICE_APPROVALS)
+    _log(f"SYS: voice confirmation {'approved' if normalized in _VOICE_APPROVALS else 'cancelled'}: {pending.title}")
+    return True
 
 
 def pending_operation_id() -> str:

@@ -185,7 +185,8 @@ def _ensure_network_access(port: int) -> None:
         # ── Try running directly (succeeds when already admin) ────────────────
         try:
             r = subprocess.run(
-                [bat_path], capture_output=True, timeout=8, shell=True
+                [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/c", bat_path],
+                capture_output=True, timeout=8, shell=False
             )
             if r.returncode == 0:
                 print(f"[Dashboard] Firewall configured for port {port}.")
