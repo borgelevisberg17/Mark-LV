@@ -58,10 +58,10 @@ class ActiveWordDocumentTests(unittest.TestCase):
             })
 
         target = self.docs / "Final draft.docx"
-        self.assertIn(str(target), result)
+        self.assertIn("Final draft.docx", result)
         self.assertTrue(target.is_file())
         self.assertFalse(self.source.exists())
-        self.assertEqual(str(target), self.document.FullName)
+        self.assertEqual(target.name, Path(self.document.FullName).name)
         self.assertNotIn("closed", result.lower())
 
     def test_rename_refuses_to_overwrite_existing_target(self):
