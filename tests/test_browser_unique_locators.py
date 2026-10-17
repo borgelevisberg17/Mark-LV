@@ -33,22 +33,22 @@ class FakePage:
         self.placeholder_locators = placeholder_locators or {}
         self.label_locators = label_locators or {}
 
-    async def get_by_role(self, role, name=None, exact=None):
+    def get_by_role(self, role, name=None, exact=None):
         return self.role_locators.get((role, name), FakeLocator())
 
-    async def get_by_text(self, _text, exact=None):
+    def get_by_text(self, _text, exact=None):
         return FakeLocator()
 
-    async def get_by_placeholder(self, text, exact=None):
+    def get_by_placeholder(self, text, exact=None):
         return self.placeholder_locators.get(text, FakeLocator())
 
-    async def get_by_label(self, text, exact=None):
+    def get_by_label(self, text, exact=None):
         return self.label_locators.get(text, FakeLocator())
 
-    async def get_by_alt_text(self, _text, exact=None):
+    def get_by_alt_text(self, _text, exact=None):
         return FakeLocator()
 
-    async def get_by_title(self, _text, exact=None):
+    def get_by_title(self, _text, exact=None):
         return FakeLocator()
 
 
