@@ -813,49 +813,83 @@ class _BrowserSession:
         return "Form filled: " + ", ".join(results)
 
     async def smart_click(self, description: str) -> str:
+        """Click only when a semantic locator resolves to exactly one target.
+
+        A zero-match locator may fall through to the next strategy. Multiple
+        matches or an exception after locating a target fail closed: the method
+        never clicks .first and never retries after an uncertain click outcome.
+        """
+        description = str(description or "").strip()
+        if not description:
+            return "Could not find element: empty description."
         page = await self._get_page()
-        for role in ("button", "link", "searchbox", "textbox", "menuitem", "tab"):
+        escaped = description.replace("\\\\", "\\\\\\\\").replace('"', '\\\"')
+        candidates = [
+            (role, page.get_by_role(role, name=description, exact=True))
+            for role in ("button", "link", "searchbox", "textbox", "menuitem", "tab")
+        ]
+        candidates.extend([
+            ("text", page.get_by_text(description, exact=True)),
+            ("placeholder", page.get_by_placeholder(description, exact=True)),
+            ("accessible attribute", page.locator(
+                f'[alt="{escaped}" i],[title="{escaped}" i],[aria-label="{escaped}" i]'
+            )),
+        ])
+        for method, locator in candidates:
             try:
-                loc = page.get_by_role(role, name=description)
-                if await loc.count() > 0:
-                    await loc.first.click(timeout=5_000)
-                    return f"Clicked ({role}): '{description}'"
-            except Exception:
-                pass
-        for attempt in (
-            lambda: page.get_by_text(description, exact=False).first.click(timeout=5_000),
-            lambda: page.get_by_placeholder(description, exact=False).first.click(timeout=5_000),
-            lambda: page.locator(
-                f'[alt*="{description}" i],[title*="{description}" i],'
-                f'[aria-label*="{description}" i]'
-            ).first.click(timeout=5_000),
-        ):
+                count = await locator.count()
+            except Exception as exc:
+                return f"Could not safely inspect {method} target '{description}': {exc}"
+            if count == 0:
+                continue
+            if count != 1:
+                return (
+                    f"Ambiguous target for '{description}' via {method}: "
+                    f"{count} matches. No click was performed; use a more specific description."
+                )
             try:
-                await attempt()
-                return f"Clicked: '{description}'"
-            except Exception:
-                pass
+                await locator.click(timeout=5_000)
+                return f"Clicked unique target ({method}): '{description}'"
+            except Exception as exc:
+                return (
+                    f"Click outcome uncertain for '{description}' via {method}: {exc}. "
+                    "No alternate locator was attempted."
+                )
         return f"Could not find element: '{description}'"
 
     async def smart_type(self, description: str, text: str) -> str:
+        """Type only into a uniquely identified semantic input."""
+        description = str(description or "").strip()
+        if not description:
+            return "Could not find input: empty description."
         page = await self._get_page()
         candidates = [
-            ("placeholder", page.get_by_placeholder(description, exact=False)),
-            ("label",       page.get_by_label(description, exact=False)),
-            ("role",        page.get_by_role("textbox", name=description)),
-            ("searchbox",   page.get_by_role("searchbox")),
-            ("combobox",    page.get_by_role("combobox", name=description)),
+            ("placeholder", page.get_by_placeholder(description, exact=True)),
+            ("label", page.get_by_label(description, exact=True)),
+            ("textbox", page.get_by_role("textbox", name=description, exact=True)),
+            ("searchbox", page.get_by_role("searchbox", name=description, exact=True)),
+            ("combobox", page.get_by_role("combobox", name=description, exact=True)),
         ]
-        for method, loc in candidates:
+        for method, locator in candidates:
             try:
-                el = loc.first
-                if await el.count() == 0:
-                    continue
-                await el.clear()
-                await el.type(text, delay=50)
-                return f"Typed into ({method}): '{description}'"
-            except Exception:
+                count = await locator.count()
+            except Exception as exc:
+                return f"Could not safely inspect {method} input '{description}': {exc}"
+            if count == 0:
                 continue
+            if count != 1:
+                return (
+                    f"Ambiguous input for '{description}' via {method}: "
+                    f"{count} matches. No text was entered; use a more specific description."
+                )
+            try:
+                await locator.fill(str(text), timeout=5_000)
+                return f"Typed into unique input ({method}): '{description}'"
+            except Exception as exc:
+                return (
+                    f"Typing outcome uncertain for '{description}' via {method}: {exc}. "
+                    "No alternate input was attempted."
+                )
         return f"Could not find input: '{description}'"
 
     async def new_tab(self, url: str = "") -> str:
