@@ -823,7 +823,6 @@ class _BrowserSession:
         if not description:
             return "Could not find element: empty description."
         page = await self._get_page()
-        escaped = description.replace("\\\\", "\\\\\\\\").replace('"', '\\\"')
         candidates = [
             (role, page.get_by_role(role, name=description, exact=True))
             for role in ("button", "link", "searchbox", "textbox", "menuitem", "tab")
