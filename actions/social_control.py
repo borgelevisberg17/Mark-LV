@@ -156,8 +156,11 @@ def _click_first(labels: tuple[str, ...]) -> str:
     last = ""
     for label in labels:
         last = _browser("smart_click", description=label)
-        if "could not find" not in last.lower() and "error" not in last.lower():
+        try:
+            _must_succeed(last, f"Click '{label}'")
             return last
+        except RuntimeError:
+            continue
     raise RuntimeError(f"Could not locate a supported control. Last result: {last[:180]}")
 
 
@@ -167,8 +170,11 @@ def _type_first(labels: tuple[str, ...], text: str) -> str:
     last = ""
     for label in labels:
         last = _browser("smart_type", description=label, text=text)
-        if "could not find" not in last.lower() and "error" not in last.lower():
+        try:
+            _must_succeed(last, f"Type into '{label}'")
             return last
+        except RuntimeError:
+            continue
     raise RuntimeError(f"Could not locate a supported input. Last result: {last[:180]}")
 
 
