@@ -177,20 +177,22 @@ def _prepare_message(platform: dict, recipient: str, message: str) -> str:
         raise ValueError("A valid contact or conversation name is required.")
     if not message or not message.strip() or len(message) > _MAX_MESSAGE:
         raise ValueError(f"Message must contain 1–{_MAX_MESSAGE} characters.")
-    url, visible = _checked_page(platform)
-    # Require the requested target to be visibly present before touching the composer.
+    url, _ = _checked_page(platform)
+    # Resolve through the visible search UI rather than trusting a sidebar mention
+    # or an old chat message as proof that the intended conversation is active.
+    _click_first(platform["search"])
+    _type_first(platform["search"], recipient)
+    _click_first((recipient,))
+    _, visible = _checked_page(platform)
     if recipient.casefold() not in visible.casefold():
-        _click_first(platform["search"])
-        _type_first(platform["search"], recipient)
         raise RuntimeError(
-            f"Search was entered for '{recipient}', but the target has not yet been "
-            "verified in the visible conversation. Inspect the page and retry after "
-            "opening the exact conversation. The message was not sent."
+            f"The conversation for '{recipient}' could not be verified after selection. "
+            "No message was composed or sent."
         )
     _type_first(platform["composer"], message)
     return (
-        f"Draft prepared for '{recipient}' on {url}. Review the visible conversation "
-        "and approve the separate send confirmation to send it. Nothing has been sent yet."
+        f"Draft prepared for '{recipient}' on {url}. The contact was selected through "
+        "the visible search UI; review the conversation and draft before sending."
     )
 
 
