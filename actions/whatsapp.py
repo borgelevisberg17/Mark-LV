@@ -17,7 +17,12 @@ def _call(parameters: dict) -> dict:
     try:
         value = json.loads(result)
     except (TypeError, json.JSONDecodeError) as exc:
-        raise RuntimeError("WhatsApp Web did not return structured data.") from exc
+        # The bridge returns plain text for execution errors. Preserve that
+        # diagnostic instead of replacing it with a generic JSON parse error.
+        detail = str(result or "").strip()
+        if detail:
+            raise RuntimeError(detail[:500]) from exc
+        raise RuntimeError("WhatsApp Web returned an empty response.") from exc
     if not isinstance(value, dict):
         raise RuntimeError("WhatsApp Web returned an unexpected result.")
     return value
@@ -106,6 +111,11 @@ def whatsapp(parameters: dict | None = None, player=None) -> str:
         result = _call(params)
     except RuntimeError as exc:
         return str(exc)
+    if operation == "status" and result.get("connected") is False:
+        result["message"] = (
+            "WhatsApp Web is open, but its chat list is not available. "
+            "Complete sign-in or wait for WhatsApp Web to finish loading, then retry."
+        )
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
