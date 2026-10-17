@@ -223,10 +223,7 @@ def social_control(parameters=None, player=None, response=None, session_memory=N
             return f"Could not confirm platform opened: {result}"
         if action == "inspect":
             url, visible = _checked_page(platform)
-            return f"Verified visible page: {url}
-Visible text (truncated):
-{visible}
-Only visible page text is inspected; hidden messages and conversation meaning are not inferred."
+            return f"Verified visible page: {url}\nVisible text (truncated):\n{visible}\nOnly visible page text is inspected; hidden messages and conversation meaning are not inferred."
         if action == "prepare_message":
             return _prepare_message(platform, str(params.get("recipient", "")), str(params.get("message", "")))
         if action in {"send_message", "start_call", "start_video_call", "end_call"}:
