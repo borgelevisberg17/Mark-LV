@@ -70,14 +70,18 @@ def resolve_user_path(
         candidate = Path(base).expanduser() / candidate
 
     try:
-        resolved = candidate.resolve(strict=must_exist)
+        # Resolve non-strictly first so a missing file produces a useful,
+        # deterministic error instead of a misleading generic resolution error.
+        # Existing parent symlinks are still canonicalized before containment
+        # is checked, and strict existence is enforced immediately afterward.
+        resolved = candidate.resolve(strict=False)
     except (OSError, RuntimeError, ValueError) as exc:
         raise PathPolicyError(f"Cannot resolve path safely: {raw_text}") from exc
 
     if not is_within_roots(resolved, roots):
         raise PathPolicyError("Access denied: path is outside the permitted directories.")
     if must_exist and not resolved.exists():
-        raise PathPolicyError("Path does not exist.")
+        raise PathPolicyError(f"Path does not exist: {resolved}")
     return resolved
 
 
