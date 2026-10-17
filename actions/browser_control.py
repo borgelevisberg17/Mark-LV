@@ -831,9 +831,9 @@ class _BrowserSession:
         candidates.extend([
             ("text", page.get_by_text(description, exact=True)),
             ("placeholder", page.get_by_placeholder(description, exact=True)),
-            ("accessible attribute", page.locator(
-                f'[alt="{escaped}" i],[title="{escaped}" i],[aria-label="{escaped}" i]'
-            )),
+            ("alt text", page.get_by_alt_text(description, exact=True)),
+            ("title", page.get_by_title(description, exact=True)),
+            ("label", page.get_by_label(description, exact=True)),
         ])
         for method, locator in candidates:
             try:
