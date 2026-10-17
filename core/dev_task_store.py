@@ -27,6 +27,7 @@ _RECOVERED: set[str] = set()
 _TASK_ID = re.compile(r"^[a-f0-9]{32}$")
 MAX_TASKS = 200
 MAX_CHECKPOINT_BYTES = 10 * 1024 * 1024
+MAX_TASK_EVENTS = 200
 _TERMINAL = {"completed", "failed", "cancelled"}
 
 
@@ -36,6 +37,31 @@ class TaskCancelled(Exception):
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _append_event(record: dict[str, Any], event_type: str, message: str | None = None) -> None:
+    """Append a bounded, user-readable state transition to the durable task timeline."""
+    events = record.get("events")
+    if not isinstance(events, list):
+        events = []
+    last_sequence = 0
+    if events and isinstance(events[-1], dict):
+        try:
+            last_sequence = int(events[-1].get("sequence", 0))
+        except (TypeError, ValueError):
+            last_sequence = len(events)
+    event = {
+        "sequence": last_sequence + 1,
+        "at": _now(), "type": str(event_type)[:40],
+        "phase": str(record.get("phase", ""))[:80],
+        "status": str(record.get("status", ""))[:40],
+        "message": str(message if message is not None else record.get("message", ""))[:500],
+    }
+    if events and isinstance(events[-1], dict):
+        previous = events[-1]
+        if all(previous.get(key) == event.get(key) for key in ("type", "phase", "status", "message")):
+            return
+    record["events"] = (events + [event])[-MAX_TASK_EVENTS:]
 
 
 def _paths(store_dir: str | Path, task_id: str) -> tuple[Path, Path]:
@@ -100,6 +126,7 @@ def _recover_once(store_dir: str | Path) -> None:
                                         if uncertain else "The application stopped during a checkpointed preparation phase. No project side effect was replayed; inspect its checkpoint before resuming."),
                             "updated_at": _now(),
                         })
+                        _append_event(record, "recovery")
                         _atomic_json(path, record)
                 except (OSError, ValueError):
                     continue
@@ -122,7 +149,9 @@ def create_task(project_dir: str | Path, store_dir: str | Path, *,
                  {"id": "review", "label": "Review exact changes and approve writes", "state": "pending"},
                  {"id": "verify", "label": "Verify in an isolated environment", "state": "pending"}],
         "plan": None, "generated": {}, "created_at": _now(), "updated_at": _now(),
+        "events": [],
     }
+    _append_event(record, "created")
     with _LOCK:
         records = sorted((Path(store_dir) / "tasks").glob("*.json"), key=lambda item: item.stat().st_mtime)
         while len(records) >= MAX_TASKS:
@@ -185,6 +214,7 @@ def update_task(task_id: str, store_dir: str | Path, *, phase: str | None = None
     path, _ = _paths(store_dir, task_id)
     with _LOCK:
         record = _read(path)
+        previous_state = (record.get("phase"), record.get("status"), record.get("message"))
         if record.get("status") in _TERMINAL:
             return record
         if phase is not None:
@@ -203,6 +233,9 @@ def update_task(task_id: str, store_dir: str | Path, *, phase: str | None = None
         if terminal:
             record["generated"] = {}
             record["plan"] = None
+        next_state = (record.get("phase"), record.get("status"), record.get("message"))
+        if next_state != previous_state:
+            _append_event(record, "state_change")
         record["updated_at"] = _now()
         _atomic_json(path, record)
         if terminal:
@@ -224,6 +257,7 @@ def checkpoint(task_id: str, store_dir: str | Path, *, phase: str,
                                "message": "Cancelled at a safe checkpoint; completed effects were not replayed.",
                                "generated": {}, "plan": None,
                                "updated_at": _now()})
+                _append_event(record, "cancelled")
                 _atomic_json(path, record)
                 _, artifact_root = _paths(store_dir, task_id)
                 shutil.rmtree(artifact_root, ignore_errors=True)
@@ -232,10 +266,12 @@ def checkpoint(task_id: str, store_dir: str | Path, *, phase: str,
                 record.update({"status": "paused", "phase": phase,
                                "message": "Paused at a safe checkpoint. Resume this task to continue.",
                                "updated_at": _now()})
+                _append_event(record, "paused")
                 _atomic_json(path, record)
             else:
                 record.update({"status": "running", "phase": phase,
                                "message": str(message)[:1000], "updated_at": _now()})
+                _append_event(record, "checkpoint")
                 _atomic_json(path, record)
                 return record
         time.sleep(max(0.1, min(2.0, poll_seconds)))
@@ -283,6 +319,7 @@ def control_task(task_id: str, store_dir: str | Path, action: str) -> dict[str, 
                                "message": "Checkpointed task cancelled without replaying any effects.",
                                "generated": {}, "plan": None})
         record["updated_at"] = _now()
+        _append_event(record, f"control_{action}")
         _atomic_json(path, record)
         if record.get("status") == "cancelled":
             _, artifact_root = _paths(store_dir, task_id)
@@ -316,6 +353,7 @@ def save_generated_file(task_id: str, store_dir: str | Path, relative_path: str,
         record.setdefault("generated", {})[relative_path] = {
             "sha256": hashlib.sha256(encoded).hexdigest(), "bytes": len(encoded),
         }
+        _append_event(record, "file_checkpoint", f"Saved generated file: {relative_path}")
         record["updated_at"] = _now()
         _atomic_json(path, record)
         return record

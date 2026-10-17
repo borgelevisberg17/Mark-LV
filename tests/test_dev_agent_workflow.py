@@ -300,6 +300,40 @@ class DevAgentWorkflowTests(unittest.TestCase):
         self.assertFalse((root / "test-output.tmp").exists())
         self.assertTrue(all(not item.parent.exists() for item in created))
 
+    def test_playwright_screenshot_evidence_accepts_only_bounded_pngs(self):
+        import base64
+
+        png = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/"
+            "lN8AAAAASUVORK5CYII="
+        )
+        with tempfile.TemporaryDirectory(prefix="marklv-pw-evidence-") as temp:
+            root = Path(temp)
+            results = root / "test-results"
+            results.mkdir()
+            (results / "desktop.png").write_bytes(png)
+            (results / "not-an-image.png").write_bytes(b"not png payload")
+            outside = root / "outside.png"
+            outside.write_bytes(png)
+            (results / "too-large.png").write_bytes(b"\\x89PNG\\r\\n\\x1a\\n" + b"x" * (8 * 1024 * 1024))
+
+            evidence = dev_agent._playwright_screenshot_evidence(root)
+
+        self.assertEqual([name for name, _data in evidence], ["desktop.png"])
+        self.assertEqual(evidence[0][1], png)
+
+    def test_playwright_screenshot_evidence_ignores_artifacts_outside_test_results(self):
+        import base64
+
+        png = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/"
+            "lN8AAAAASUVORK5CYII="
+        )
+        with tempfile.TemporaryDirectory(prefix="marklv-pw-evidence-empty-") as temp:
+            root = Path(temp)
+            (root / "screenshot.png").write_bytes(png)
+            self.assertEqual(dev_agent._playwright_screenshot_evidence(root), [])
+
     def test_existing_project_fix_is_reviewed_before_write_and_rolls_back_on_failure(self):
         root = Path(tempfile.gettempdir()) / "approved-existing-fix"
         root.mkdir(exist_ok=True)

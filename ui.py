@@ -2986,6 +2986,7 @@ class MainWindow(QMainWindow):
     _log_sig        = pyqtSignal(str)
     _state_sig      = pyqtSignal(str)
     _content_sig    = pyqtSignal(str, str)   # (title, text) — thread-safe content display
+    _image_sig      = pyqtSignal(str, bytes) # verified local PNG evidence, delivered in memory
     _reconfig_sig   = pyqtSignal()           # trigger setup overlay from any thread
     _camera_sig     = pyqtSignal(bytes)      # show camera frame preview (small overlay)
     _cam_stream_sig = pyqtSignal(bool)       # True=start live stream, False=stop
@@ -3271,6 +3272,7 @@ class MainWindow(QMainWindow):
         self._log_sig.connect(self._log.append_log)
         self._state_sig.connect(self._apply_state)
         self._content_sig.connect(self._show_content)
+        self._image_sig.connect(self._show_image_evidence)
         self._reconfig_sig.connect(self._show_setup)
         self._camera_sig.connect(self._show_camera_frame)
         self._confirm_sig.connect(self._show_confirm_banner)
@@ -4832,6 +4834,12 @@ class MainWindow(QMainWindow):
                 height: 0; border: none;
             }}
         """)
+        self._content_image = QLabel()
+        self._content_image.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._content_image.setMaximumHeight(260)
+        self._content_image.setStyleSheet(f"background: {C.DARK}; border: 1px solid {C.BORDER};")
+        self._content_image.hide()
+        lay.addWidget(self._content_image)
         lay.addWidget(self._content_display)
 
         return w
@@ -4844,6 +4852,9 @@ class MainWindow(QMainWindow):
         self.hud.glance(0.0, -0.85, hold=1.3)
         self._content_title_lbl.setText(title.upper()[:48])
         self._content_ts_lbl.setText(_time.strftime("%H:%M:%S"))
+        self._content_image.clear()
+        self._content_image.hide()
+        self._content_display.show()
         self._content_display.setPlainText(text)
         self._content_display.moveCursor(
             self._content_display.textCursor().MoveOperation.Start
@@ -4853,6 +4864,27 @@ class MainWindow(QMainWindow):
         if first_show:
             total = self._center_split.height()
             self._center_split.setSizes([max(total - 220, 120), 220])
+
+    def _show_image_evidence(self, title: str, image_bytes: bytes):
+        """Show a bounded PNG supplied by the isolated development verifier."""
+        if not isinstance(image_bytes, bytes) or not image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+            return
+        pixmap = QPixmap()
+        if not pixmap.loadFromData(image_bytes, "PNG") or pixmap.isNull():
+            return
+        self.hud.glance(0.0, -0.85, hold=1.3)
+        self._content_title_lbl.setText(str(title or "UI EVIDENCE").upper()[:48])
+        self._content_ts_lbl.setText(time.strftime("%H:%M:%S"))
+        self._content_display.setPlainText("Playwright screenshot captured in the isolated verification workspace.")
+        self._content_image.setPixmap(pixmap.scaled(1000, 240,
+            Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        self._content_image.show()
+        self._content_display.show()
+        first_show = not self._content_panel.isVisible()
+        self._content_panel.show()
+        if first_show:
+            total = self._center_split.height()
+            self._center_split.setSizes([max(total - 300, 120), 300])
 
     # ── document review ──────────────────────────────────────────────────────
     # Rendered as rich text into the content panel that already exists, rather
@@ -6096,6 +6128,14 @@ class JarvisUI:
     def show_content(self, title: str, text: str):
         """Thread-safe: display content in the panel below the HUD."""
         self._win._content_sig.emit(title[:48], text[:4000])
+
+    def show_image_evidence(self, title: str, image_bytes: bytes):
+        """Thread-safe preview for a bounded PNG; no artifact path is exposed."""
+        if not isinstance(image_bytes, bytes) or len(image_bytes) > 8 * 1024 * 1024:
+            return
+        if not image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+            return
+        self._win._image_sig.emit(str(title or "UI evidence")[:48], image_bytes)
 
     def show_quiz(self, topic: str, questions, grade=None) -> None:
         """Thread-safe: put an interactive quiz on the board.

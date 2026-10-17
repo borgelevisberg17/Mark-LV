@@ -67,6 +67,29 @@ class DevelopmentTaskStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "different project"):
             tasks.load_generated_files(task["task_id"], store, other)
 
+    def test_task_timeline_persists_ordered_checkpoint_and_approval_transitions(self):
+        project, store = self._new()
+        task = tasks.create_task(project, store, goal="Build", language="python", project_name="app")
+        tasks.checkpoint(task["task_id"], store, phase="generating", message="File checkpoint ready.")
+        tasks.update_task(task["task_id"], store, phase="awaiting_approval", status="awaiting_approval",
+                          message="Waiting for the exact diff approval.")
+        record = tasks.get_task(task["task_id"], store)
+        events = record["events"]
+        self.assertGreaterEqual(len(events), 3)
+        self.assertEqual([item["sequence"] for item in events], sorted(item["sequence"] for item in events))
+        self.assertEqual(events[0]["type"], "created")
+        self.assertTrue(any("File checkpoint ready" in item["message"] for item in events))
+        self.assertEqual(events[-1]["status"], "awaiting_approval")
+
+    def test_task_timeline_has_a_hard_retention_bound(self):
+        record = {"events": [], "phase": "generating", "status": "running"}
+        for index in range(tasks.MAX_TASK_EVENTS + 5):
+            record["message"] = f"checkpoint {index}"
+            tasks._append_event(record, "checkpoint")
+        self.assertEqual(len(record["events"]), tasks.MAX_TASK_EVENTS)
+        self.assertEqual(record["events"][-1]["message"], "checkpoint 204")
+        self.assertGreater(record["events"][-1]["sequence"], record["events"][0]["sequence"])
+
     def test_restart_marks_running_task_interrupted_without_replay(self):
         project, store = self._new()
         task = tasks.create_task(project, store, goal="Build", language="python", project_name="app")
@@ -131,6 +154,7 @@ class DevelopmentTaskStoreTests(unittest.TestCase):
             status = dev_agent.dev_agent({"mode": "task_status", "task_id": task["task_id"]})
             task_list = dev_agent.dev_agent({"mode": "task_list"})
         self.assertIn("running / planning", status)
+        self.assertIn("Recent timeline", status)
         self.assertIn(task["task_id"], task_list)
 
     def test_resume_mode_restarts_only_a_recoverable_checkpoint(self):

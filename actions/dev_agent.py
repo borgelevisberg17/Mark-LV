@@ -367,7 +367,7 @@ Critical rules:
 12. State material assumptions and unknowns. If an unknown changes architecture, security, user-visible behavior, or scope and cannot be safely inferred, ask the user before writing files. Never invent certainty.
 13. Map each acceptance criterion to an executable check or an explicitly manual review. Do not claim visual/browser validation unless an isolated browser run produced evidence.
 14. Do not use shell chaining, pipes, redirection, or commands that start a long-running server as verification.
-15. For a runnable web application, include a small Chromium/Playwright end-to-end smoke test when the selected stack supports it: JavaScript/TypeScript projects need @playwright/test, playwright.config.*, and an e2e or test:e2e script; Python web projects need playwright and pytest, plus tests/e2e checks. Configure the test runner to manage any app server on loopback and stop it after the test. Keep the browser test focused on loading the real app, one core user flow, and basic keyboard/accessibility behavior. Include every new dependency and check in the plan. If a runnable browser suite cannot be created safely for the selected stack, explain why and map the UI criteria to honest manual checks.
+15. For a runnable web application, include a small Chromium/Playwright end-to-end smoke test when the selected stack supports it: JavaScript/TypeScript projects need @playwright/test, playwright.config.*, and an e2e or test:e2e script; Python web projects need playwright and pytest, plus tests/e2e checks. Configure the test runner to manage any app server on loopback and stop it after the test. Keep the browser test focused on loading the real app and one core user flow. Capture desktop and narrow/mobile viewport screenshots under test-results so the verifier can preview them in Mark. Cover keyboard operation and semantic/accessibility expectations; add an axe-core scan only when compatible with the chosen runner and include every dependency in the approved plan. If responsive captures or automated accessibility checks cannot be created safely, explain why and map the criteria to honest manual checks.
 
 JSON:"""
 
@@ -771,6 +771,41 @@ def _run_playwright_project(command: str, project_dir: Path, timeout: int,
         return f"Playwright Chromium sandbox could not start: {exc}"
 
 
+def _playwright_screenshot_evidence(project_dir: Path) -> list[tuple[str, bytes]]:
+    """Read at most two bounded PNG screenshots from Playwright's disposable output."""
+    root = (project_dir / "test-results").resolve()
+    if not root.is_dir() or root.is_symlink():
+        return []
+    evidence = []
+    total = 0
+    for current, dirs, files in os.walk(root, topdown=True, followlinks=False):
+        current_path = Path(current)
+        dirs[:] = sorted(name for name in dirs
+                         if not (current_path / name).is_symlink())
+        for name in sorted(files):
+            if Path(name).suffix.casefold() != ".png":
+                continue
+            candidate = current_path / name
+            try:
+                if candidate.is_symlink() or not candidate.is_file():
+                    continue
+                if candidate.resolve().parent != current_path.resolve():
+                    continue
+                size = candidate.stat().st_size
+                if not 8 <= size <= 8 * 1024 * 1024 or total + size > 12 * 1024 * 1024:
+                    continue
+                data = candidate.read_bytes()
+                if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+                    continue
+                evidence.append((candidate.name[:80], data))
+                total += len(data)
+                if len(evidence) == 2:
+                    return evidence
+            except OSError:
+                continue
+    return evidence
+
+
 @contextmanager
 def _verification_workspace(project_dir: Path):
     """Create a disposable, bounded project copy; test artifacts never touch source."""
@@ -810,6 +845,8 @@ def _execute_project_workflow(
     timeout: int,
     language: str,
     player=None,
+    task_id: str = "",
+    task_store: Path | None = None,
 ) -> str:
     """Reuse an isolated persistent dependency cache while testing disposable source copies."""
     manager = "npm" if language.lower() in {"javascript", "typescript", "js", "ts", "node"} else "pip"
@@ -821,6 +858,10 @@ def _execute_project_workflow(
         runtime_cache = None
         if dependencies:
             log(f"Preparing the approved persistent {manager} environment…")
+            if task_id and task_store:
+                from core.dev_task_store import update_task
+                update_task(task_id, task_store, phase="dependency_install", status="running",
+                            message=f"Installing the approved {len(dependencies)}-package environment.")
             runtime_cache = _ensure_runtime_dependencies(
                 dependencies, project_dir, language, player=player
             )
@@ -832,11 +873,23 @@ def _execute_project_workflow(
             checks = (run_command if isinstance(run_command, list) else
                       [{"label": "Project verification", "command": run_command, "source": "declared command"}])
             check_results = []
+            screenshot_evidence = []
             for check in checks:
                 command = check["command"]
                 log(f"Running quality check: {check['label']} ({command})…")
+                if task_id and task_store:
+                    from core.dev_task_store import update_task
+                    update_task(task_id, task_store, phase="verifying", status="running",
+                                message=f"Running {check['label']}: {command}")
                 if check["label"] == "Playwright UI/E2E (Chromium)":
                     output = _run_playwright_project(command, test_dir, timeout=timeout, language=language)
+                    if player:
+                        screenshot_evidence = _playwright_screenshot_evidence(test_dir)
+                        for index, (name, image_bytes) in enumerate(screenshot_evidence):
+                            try:
+                                player.show_image_evidence(f"UI evidence · {name}", image_bytes)
+                            except Exception:
+                                pass
                 else:
                     output = _run_project(command, test_dir, timeout=timeout, language=language)
                 check_results.append((check, output))
@@ -846,6 +899,8 @@ def _execute_project_workflow(
                 not _has_error(output, check["command"]) for check, output in check_results
             )
             result = "\n\n".join(f"[{check['label']}]\n{output}" for check, output in check_results)
+            if screenshot_evidence:
+                result += f"\n\nUI evidence: {len(screenshot_evidence)} verified PNG screenshot(s) previewed in the Mark panel."
             if passed:
                 summary = (f"Sandbox verification passed ({len(checks)} check(s)).\n{result}\n"
                            "Test workspace and generated test artifacts were removed automatically.")
@@ -1324,6 +1379,7 @@ def _build_project(
                 project_dir, bounded_timeout, language, player,
                 architecture=architecture, acceptance_criteria=acceptance_criteria,
                 context_store=context_store,
+                task_id=task_id, task_store=task_store,
             )
         except Exception as exc:
             update_task(task_id, task_store, status="failed", phase="execution_failed",
@@ -1379,6 +1435,7 @@ def _execute_approved_project(
     player=None,
     *, architecture: str = "", acceptance_criteria: list[str] | None = None,
     context_store: Path | None = None,
+    task_id: str = "", task_store: Path | None = None,
 ) -> str:
     """Apply only the approved sources, then build and verify in the sandbox."""
     project_existed = project_dir.exists()
@@ -1399,6 +1456,7 @@ def _execute_approved_project(
         raise RuntimeError(f"Approved files could not be applied safely: {apply_error}")
     result = _execute_project_workflow(
         dependencies, run_command, project_dir, timeout, language, player,
+        task_id=task_id, task_store=task_store,
     )
     if context_store is not None:
         from core.dev_project_context import save_project_context
@@ -2038,6 +2096,13 @@ def dev_agent(
                         f"Project: {record.get('project_name')} ({record.get('project_id')})\n"
                         f"Checkpointed files: {', '.join(record.get('generated', {})) or 'none'}\n"
                         f"Last update: {record.get('updated_at')}\n{record.get('message', '')}\nTo do:\n{todo}")
+                events = record.get("events", [])
+                if isinstance(events, list) and events:
+                    timeline = [
+                        f"  {event.get('at', '')} | {event.get('phase', '')}/{event.get('status', '')} | {event.get('message', '')}"
+                        for event in events[-10:] if isinstance(event, dict)
+                    ]
+                    status_text += "\nRecent timeline (latest first):\n" + "\n".join(reversed(timeline))
                 _show_dev_progress(player, "Development task status", status_text)
                 return status_text
             action = "resume" if mode == "resume" else task_action.strip().lower()
