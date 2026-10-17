@@ -202,83 +202,195 @@ def _prepare_message(platform: dict, recipient: str, message: str) -> str:
     )
 
 
-def _desktop_control(action: str, **kwargs) -> str:
-    """Use the existing local desktop action; never invokes a social API."""
-    from actions.computer_control import computer_control
-    return str(computer_control(parameters={"action": action, **kwargs}) or "")
-
-
-def _desktop_snapshot(platform: dict) -> dict:
-    """Read only the visible desktop screenshot using the existing Gemini client."""
+def _desktop_window(platform: dict):
+    """Find the visible installed-app window through local Windows UI Automation."""
+    import platform as system_platform
+    if system_platform.system() != "Windows":
+        raise RuntimeError(
+            "Native social-app control currently requires Windows UI Automation. "
+            "Use mode='browser' on this operating system."
+        )
     try:
-        import io
-        import json
-        import pyautogui
-        from google.genai import types as gtypes
+        from pywinauto import Desktop
     except ImportError as exc:
-        raise RuntimeError(f"Desktop visual inspection dependency unavailable: {exc}") from exc
-    image = pyautogui.screenshot()
-    buffer = io.BytesIO()
-    image.save(buffer, format="PNG")
-    from core import gemini
-    prompt = (
-        "Inspect this screenshot of a desktop application. Extract only text and controls "
-        "that are visibly readable; do not infer hidden state. Return ONLY valid JSON with "
-        "keys active_conversation_title (string or empty), visible_text (string), "
-        "message_composer_text (string or empty), and visible_controls (array of strings). "
-        "For active_conversation_title, use only the clear title/header of the currently "
-        "open conversation, not search results, sidebar entries, or old messages. If uncertain, "
-        "return an empty string. Do not include credentials or speculate. "
-        f"Target application: {platform['app']}."
-    )
-    response = gemini.call(
-        [gtypes.Part.from_bytes(data=buffer.getvalue(), mime_type="image/png"), prompt],
-        tier=gemini.FAST, timeout_ms=20_000,
-    )
-    if response is None:
-        raise RuntimeError("Visual inspection did not return a result; no action was taken.")
-    raw = (response.text or "").strip()
-    try:
-        result = json.loads(raw)
-    except (TypeError, ValueError) as exc:
-        raise RuntimeError("Visual inspection returned unreadable structured data; no action was taken.") from exc
-    if not isinstance(result, dict) or not isinstance(result.get("visible_text"), str):
-        raise RuntimeError("Visual inspection did not provide visible text; no action was taken.")
-    result["active_conversation_title"] = str(result.get("active_conversation_title") or "").strip()
-    result["message_composer_text"] = str(result.get("message_composer_text") or "").strip()
-    result["visible_controls"] = result.get("visible_controls") if isinstance(result.get("visible_controls"), list) else []
-    result["visible_text"] = result["visible_text"][:_MAX_PAGE_TEXT]
-    return result
+        raise RuntimeError("pywinauto is not installed; install the project's Windows dependencies.") from exc
+
+    expected = platform["app"].casefold()
+    matches = []
+    for window in Desktop(backend="uia").windows(visible_only=True):
+        try:
+            title = (window.window_text() or "").strip()
+            if title and expected in title.casefold() and window.is_visible() and window.is_enabled():
+                matches.append(window)
+        except Exception:
+            continue
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"Could not uniquely identify a visible {platform['app']} window "
+            f"(matches: {len(matches)}). Focus the intended app and retry."
+        )
+    return matches[0]
 
 
-def _desktop_find(description: str) -> tuple[int, int]:
-    """Locate one visible UI element and reject coordinates outside the current screen."""
-    result = _desktop_control("screen_find", description=description).strip()
-    match = re.fullmatch(r"(\d+)\s*,\s*(\d+)", result)
-    if not match:
-        raise RuntimeError(f"Could not locate '{description}' on the desktop; no action was taken.")
-    x, y = int(match.group(1)), int(match.group(2))
+def _uia_text(control) -> str:
     try:
-        import pyautogui
-        width, height = pyautogui.size()
+        value = (control.window_text() or "").strip()
+        if value:
+            return value
+    except Exception:
+        pass
+    try:
+        value = str(control.iface_value.CurrentValue or "").strip()
+        if value:
+            return value
+    except Exception:
+        pass
+    return ""
+
+
+def _uia_controls(window) -> list[dict]:
+    controls = []
+    try:
+        descendants = window.descendants()
+    except Exception as exc:
+        raise RuntimeError(f"Could not inspect the app accessibility tree: {exc}") from exc
+    for control in descendants:
+        try:
+            if not control.is_visible() or not control.is_enabled():
+                continue
+            rect = control.rectangle()
+            if rect.width() <= 0 or rect.height() <= 0:
+                continue
+            name = _uia_text(control)
+            control_type = str(control.element_info.control_type or "")
+            if name or control_type == "Edit":
+                controls.append({
+                    "control": control,
+                    "name": name,
+                    "type": control_type,
+                    "left": rect.left,
+                    "top": rect.top,
+                    "right": rect.right,
+                    "bottom": rect.bottom,
+                })
+        except Exception:
+            continue
+    return controls
+
+
+def _desktop_snapshot(platform: dict, recipient: str = "") -> dict:
+    """Inspect the local Windows accessibility tree; no screenshot leaves the PC."""
+    window = _desktop_window(platform)
+    controls = _uia_controls(window)
+    if not controls:
+        raise RuntimeError("The app exposes no readable visible UI controls; no action was taken.")
+    visible_text = "\\n".join(dict.fromkeys(
+        item["name"] for item in controls if item["name"]
+    ))[:_MAX_PAGE_TEXT]
+    composer = ""
+    for item in sorted(controls, key=lambda row: row["bottom"], reverse=True):
+        if item["type"] == "Edit" and item["bottom"] >= window.rectangle().bottom - 180:
+            composer = _uia_text(item["control"])
+            if composer:
+                break
+
+    active_title = ""
+    if recipient:
+        bounds = window.rectangle()
+        candidates = [
+            item for item in controls
+            if item["name"].casefold() == recipient.casefold()
+            and item["type"] in {"Text", "Button", "Hyperlink", "TabItem"}
+            and item["left"] >= bounds.left + int(bounds.width() * 0.25)
+            and item["top"] <= bounds.top + int(bounds.height() * 0.45)
+        ]
+        if len(candidates) == 1:
+            active_title = candidates[0]["name"]
+    return {
+        "active_conversation_title": active_title,
+        "visible_text": visible_text,
+        "message_composer_text": composer,
+        "visible_controls": [item["name"] for item in controls if item["name"]][:100],
+    }
+
+
+def _desktop_click(description: str, platform: dict, recipient: str = "") -> str:
+    """Click a named/role-matched visible UIA element in the selected app window."""
+    window = _desktop_window(platform)
+    controls = _uia_controls(window)
+    query = description.casefold()
+    candidates = []
+    bounds = window.rectangle()
+
+    for item in controls:
+        name, kind = item["name"].casefold(), item["type"]
+        score = None
+        if query == "search field":
+            if kind == "Edit" and ("search" in name or not name):
+                score = 0 if "search" in name else 2
+            elif kind == "Button" and "search" in name:
+                score = 3
+        elif query.startswith("search result named "):
+            target = recipient or description[len("search result named "):]
+            if name == target.casefold() and kind in {"Text", "Button", "ListItem", "Hyperlink"}:
+                score = 0
+            elif target.casefold() in name and kind in {"Text", "Button", "ListItem", "Hyperlink"}:
+                score = 1
+        elif query == "message composer":
+            if kind == "Edit" and item["bottom"] >= bounds.top + int(bounds.height() * 0.55):
+                score = 0
+        elif query == "send message button":
+            if kind == "Button" and name in {"send", "send message", "send message (enter)"}:
+                score = 0
+            elif kind == "Button" and "send" in name:
+                score = 1
+        elif query == "start voice call button":
+            if kind == "Button" and ("call" in name or "voice" in name) and "video" not in name and "end" not in name and "hang up" not in name:
+                score = 0 if "voice" in name else 1
+        elif query == "start video call button":
+            if kind == "Button" and "video" in name and "call" in name:
+                score = 0
+        elif query == "end call button":
+            if kind == "Button" and ("end call" in name or "hang up" in name or "leave call" in name):
+                score = 0
+        if score is not None:
+            candidates.append((score, item))
+
+    if not candidates:
+        raise RuntimeError(f"Could not find visible UI element '{description}' in {platform['app']}.")
+    candidates.sort(key=lambda pair: (pair[0], pair[1]["top"], pair[1]["left"]))
+    best_score = candidates[0][0]
+    best = [item for score, item in candidates if score == best_score]
+    if query.startswith("search result named ") and len(best) != 1:
+        raise RuntimeError("The search result is ambiguous; no element was clicked.")
+    target = best[0]["control"]
+    try:
+        target.click_input()
+        return f"Clicked visible {target.element_info.control_type}: {target.window_text() or description}"
+    except Exception as exc:
+        raise RuntimeError(f"Could not click '{description}' in {platform['app']}: {exc}") from exc
+
+
+def _desktop_type(platform: dict, text: str) -> str:
+    """Type into the currently focused local control, preferring UIA value setting."""
+    try:
+        from pywinauto.keyboard import send_keys
     except ImportError as exc:
-        raise RuntimeError("PyAutoGUI is required for desktop interaction.") from exc
-    if not (0 <= x < width and 0 <= y < height):
-        raise RuntimeError("The visual locator returned out-of-screen coordinates; no action was taken.")
-    return x, y
-
-
-def _desktop_click(description: str) -> str:
-    x, y = _desktop_find(description)
-    result = _desktop_control("click", x=x, y=y)
-    _must_succeed(result, f"Click desktop element '{description}'")
-    return result
-
-
-def _desktop_type(text: str) -> str:
-    result = _desktop_control("smart_type", text=text, clear_first=True)
-    _must_succeed(result, "Type into desktop field")
-    return result
+        raise RuntimeError("pywinauto keyboard support is unavailable.") from exc
+    window = _desktop_window(platform)
+    focused = window.get_focus()
+    if focused is None:
+        raise RuntimeError("No focused input field is available; no text was entered.")
+    try:
+        if focused.element_info.control_type == "Edit":
+            focused.set_edit_text(text)
+        else:
+            # Clipboard-independent local keyboard input; escape pywinauto metacharacters.
+            escaped = text.replace("{", "{{}").replace("}", "{}}")
+            send_keys(escaped, with_spaces=True, pause=0.005)
+        return "Text entered into the focused local UI control."
+    except Exception as exc:
+        raise RuntimeError(f"Could not enter text into the focused UI control: {exc}") from exc
 
 
 def _desktop_prepare_message(platform: dict, recipient: str, message: str) -> str:
@@ -286,33 +398,33 @@ def _desktop_prepare_message(platform: dict, recipient: str, message: str) -> st
         raise ValueError("A valid contact or conversation name is required.")
     if not message or not message.strip() or len(message) > _MAX_MESSAGE:
         raise ValueError(f"Message must contain 1–{_MAX_MESSAGE} characters.")
-    focus = _desktop_control("focus_window", title=platform["app"])
-    if any(token in focus.lower() for token in ("failed", "requires", "unknown os")):
-        raise RuntimeError(f"Could not focus the {platform['app']} window: {focus}")
-    initial = _desktop_snapshot(platform)
-    if not initial["visible_text"].strip():
-        raise RuntimeError("The app window has no readable visible text; no action was taken.")
-    _desktop_click("search field")
-    _desktop_type(recipient)
-    search_state = _desktop_snapshot(platform)
+    window = _desktop_window(platform)
+    try:
+        window.set_focus()
+    except Exception as exc:
+        raise RuntimeError(f"Could not focus the {platform['app']} window: {exc}") from exc
+    _desktop_snapshot(platform)
+    _desktop_click("search field", platform)
+    _desktop_type(platform, recipient)
+    search_state = _desktop_snapshot(platform, str(params.get("recipient", "")).strip())
     if recipient.casefold() not in search_state["visible_text"].casefold():
         raise RuntimeError("The requested contact is not visible in desktop search results; nothing was composed.")
-    _desktop_click(f"search result named {recipient}")
-    selected = _desktop_snapshot(platform)
+    _desktop_click(f"search result named {recipient}", platform, recipient)
+    selected = _desktop_snapshot(platform, recipient)
     header = selected["active_conversation_title"]
-    if not header or recipient.casefold() not in header.casefold():
+    if not header or header.casefold() != recipient.casefold():
         raise RuntimeError(
             "The active conversation header could not be verified as the requested recipient. "
             "No message was composed or sent."
         )
-    _desktop_click("message composer")
-    _desktop_type(message)
-    drafted = _desktop_snapshot(platform)
+    _desktop_click("message composer", platform)
+    _desktop_type(platform, message)
+    drafted = _desktop_snapshot(platform, recipient)
     if message not in drafted["message_composer_text"]:
         raise RuntimeError("The exact draft could not be verified in the message composer; it was not sent.")
     return (
         f"Draft prepared in the {platform['app']} desktop UI for '{recipient}'. "
-        "The active conversation header and exact draft were visually checked. Review before sending."
+        "The active conversation header and exact draft were checked using local UI Automation."
     )
 
 
@@ -320,8 +432,8 @@ def _desktop_send_message(platform: dict, recipient: str, message: str) -> str:
     prepared = _desktop_prepare_message(platform, recipient, message)
     if "draft prepared" not in prepared.lower():
         raise RuntimeError("Desktop message preparation was not verified.")
-    _desktop_click("Send message button")
-    after = _desktop_snapshot(platform)
+    _desktop_click("send message button", platform)
+    after = _desktop_snapshot(platform, recipient)
     if message not in after["visible_text"]:
         raise RuntimeError("The exact message was not visible after clicking Send; delivery is unconfirmed.")
     return (
@@ -364,7 +476,7 @@ def social_control(parameters=None, player=None, response=None, session_memory=N
                     f"Desktop app: {platform['app']}\n"
                     f"Active conversation header: {state['active_conversation_title'] or '(not verified)'}\n"
                     f"Visible text (truncated):\n{state['visible_text']}\n"
-                    "This is screenshot-based extraction; uncertain text is not treated as verified."
+                    "This is local Windows accessibility-tree extraction; unsupported or uncertain controls are not treated as verified."
                 )
             url, visible = _checked_page(platform)
             return f"Verified visible page: {url}\nVisible text (truncated):\n{visible}\nOnly visible page text is inspected; hidden messages and conversation meaning are not inferred."
@@ -409,7 +521,7 @@ def social_control(parameters=None, player=None, response=None, session_memory=N
                 )
                 def operation():
                     if desktop_mode:
-                        before = _desktop_snapshot(platform)
+                        before = _desktop_snapshot(platform, recipient)
                         if not before["active_conversation_title"] or (
                             recipient and recipient.casefold() not in before["active_conversation_title"].casefold()
                         ):
@@ -418,8 +530,8 @@ def social_control(parameters=None, player=None, response=None, session_memory=N
                             "call": "Start voice call button",
                             "video_call": "Start video call button",
                             "end_call": "End call button",
-                        }[control_action])
-                        after = _desktop_snapshot(platform)
+                        }[control_action], platform, recipient)
+                        after = _desktop_snapshot(platform, recipient)
                         return f"Desktop UI control clicked and screen re-read. Result: {result}. Visible text: {after['visible_text'][:1200]}. Call state still requires visual confirmation."
                     _, before = _checked_page(platform)
                     if recipient and recipient.casefold() not in before.casefold():
