@@ -172,3 +172,9 @@ def test_desktop_send_fails_if_text_remains_in_composer():
             assert "composer cleared" in str(exc)
         else:
             raise AssertionError("A still-populated composer must not be treated as a sent message")
+
+
+def test_every_configured_social_platform_has_an_approved_app_launcher_alias():
+    from actions.open_app import _normalize
+    for platform in social._PLATFORMS.values():
+        assert _normalize(platform["app"]) is not None, platform["app"]
