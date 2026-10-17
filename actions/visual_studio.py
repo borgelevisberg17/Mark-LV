@@ -441,7 +441,7 @@ def visual_studio(parameters: dict, player=None, speak=None, dashboard=None, eve
             inserted = None
             target = str(params.get("target_file_path", "") or "").strip()
             if target:
-                target_path = _preflight_target(target, params.get("slide_index"))
+                target_path = _preflight_target(target, params.get("slide_index"), params.get("pptx_placement"), params.get("shape_index"), params.get("docx_insertion_mode"), params.get("insert_after_text"))
                 caption = str(params.get("caption", "") or "")
                 if target_path.suffix.lower() == ".docx":
                     mode = str(params.get("docx_insertion_mode", "cover") or "cover").lower()
@@ -460,7 +460,7 @@ def visual_studio(parameters: dict, player=None, speak=None, dashboard=None, eve
             target = str(params.get("target_file_path", "") or "").strip()
             if not target:
                 raise ValueError("target_file_path is required for insert.")
-            target_path = _preflight_target(target, params.get("slide_index"))
+            target_path = _preflight_target(target, params.get("slide_index"), params.get("pptx_placement"), params.get("shape_index"), params.get("docx_insertion_mode"), params.get("insert_after_text"))
             caption = str(params.get("caption", "") or "")
             if target_path.suffix.lower() == ".docx":
                 mode = str(params.get("docx_insertion_mode", "cover") or "cover").lower()
