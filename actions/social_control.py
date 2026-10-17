@@ -549,7 +549,7 @@ def social_control(parameters=None, player=None, response=None, session_memory=N
                 title = f"{action.replace('_', ' ')} on {key}"
                 detail = (
                     f"Platform: {key}\nRequested UI action: {control_action}\n"
-                    f"Visible page must be verified before clicking. Approve only if the correct conversation is open."
+                    f"Visible app UI must be verified before clicking. Approve only if the correct conversation is open."
                 )
                 def operation():
                     if desktop_mode:
@@ -566,7 +566,7 @@ def social_control(parameters=None, player=None, response=None, session_memory=N
                             "end_call": "End call button",
                         }[control_action], platform, recipient)
                         after = _desktop_snapshot(platform, recipient)
-                        return f"Desktop UI control clicked and screen re-read. Result: {result}. Visible text: {after['visible_text'][:1200]}. Call state still requires visual confirmation."
+                        return f"Desktop UI control clicked and accessibility tree re-read. Result: {result}. Visible text: {after['visible_text'][:1200]}. Call state still requires visual confirmation."
                     _, before = _checked_page(platform)
                     if recipient and recipient.casefold() not in before.casefold():
                         raise RuntimeError("The requested contact is not visible; no call control was clicked.")
