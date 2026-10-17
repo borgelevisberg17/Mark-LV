@@ -144,8 +144,12 @@ def _checked_page(platform: dict) -> tuple[str, str]:
 
 
 def _must_succeed(result: str, operation: str) -> None:
-    bad = ("could not find", "could not start", "browser error", "bridge error",
-           "unknown browser action", "did not respond", "timed out", "failed")
+    bad = (
+        "could not find", "could not start", "browser error", "bridge error",
+        "unknown browser action", "did not respond", "timed out", "failed",
+        "ambiguous", "uncertain", "no click was performed", "no text was entered",
+        "could not safely inspect", "no alternate locator", "no alternate input",
+    )
     if not result.strip() or any(token in result.lower() for token in bad):
         raise RuntimeError(f"{operation} was not confirmed by the UI: {result[:240]}")
 
