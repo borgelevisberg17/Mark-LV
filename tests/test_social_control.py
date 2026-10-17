@@ -52,13 +52,17 @@ def test_inspect_reports_bridge_errors_as_failure():
             raise AssertionError("Bridge error should not be reported as page content")
 
 
-def test_message_requires_visible_recipient_before_composer_is_touched():
+def test_unverified_recipient_stops_before_composer_is_touched():
     platform = social._PLATFORMS["whatsapp"]
     with patch.object(social, "_checked_page", return_value=("https://web.whatsapp.com/", "Chat with Alice")), \
          patch.object(social, "_click_first") as click, \
          patch.object(social, "_type_first") as type_text:
-        result = social._prepare_message(platform, "Bob", "Hello")
-        assert "not yet been verified" in result
+        try:
+            social._prepare_message(platform, "Bob", "Hello")
+        except RuntimeError as exc:
+            assert "not yet been verified" in str(exc)
+        else:
+            raise AssertionError("Unverified recipient must stop the operation")
         click.assert_called_once_with(platform["search"])
         type_text.assert_called_once_with(platform["search"], "Bob")
 
