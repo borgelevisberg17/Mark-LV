@@ -89,6 +89,21 @@ def _font(size: int):
     return ImageFont.load_default()
 
 
+def _iter_docx_paragraphs(container, seen=None):
+    """Yield document paragraphs, including nested table cells, without duplicates."""
+    if seen is None:
+        seen = set()
+    for paragraph in getattr(container, "paragraphs", ()):
+        identity = id(paragraph._p)
+        if identity not in seen:
+            seen.add(identity)
+            yield paragraph
+    for table in getattr(container, "tables", ()):
+        for row in table.rows:
+            for cell in row.cells:
+                yield from _iter_docx_paragraphs(cell, seen)
+
+
 def _compose_cover_text(image_path: Path, params: dict) -> Path:
     """Add readable, deterministic cover typography while retaining the raw asset."""
     title = str(params.get("cover_title", "") or "").strip()
