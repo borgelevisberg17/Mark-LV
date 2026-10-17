@@ -246,7 +246,7 @@ Only visible page text is inspected; hidden messages and conversation meaning ar
                 def operation():
                     prepared = _prepare_message(platform, recipient, message)
                     # Do not send if preparation reports a mismatch or any uncertainty.
-                    if "nothing has been sent yet" not in prepared.lower():
+                    if "draft prepared" not in prepared.lower():
                         raise RuntimeError("Message preparation was not verified.")
                     _click_first(platform["send"])
                     _, visible_after = _checked_page(platform)
