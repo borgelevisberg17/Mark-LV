@@ -723,9 +723,15 @@ class JarvisLive:
         if enable:
             if not wake_is_ready():
                 return "need_download"
+            # Do not persist an enabled state until the detector has actually started.
+            if not self._ensure_wake_detector():
+                self._wake_enabled = False
+                save_wake_word_enabled(False)
+                self._awake = True
+                self.ui.write_log("SYS: Wake word could not start; it remains disabled. Check the setup error above.")
+                return "unavailable"
             self._wake_enabled = True
             save_wake_word_enabled(True)
-            self._ensure_wake_detector()
             self.sleep(reason="wake word enabled")
             return "enabled"
         else:

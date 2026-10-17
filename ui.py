@@ -4032,7 +4032,7 @@ class MainWindow(QMainWindow):
         close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         close_btn.setStyleSheet(f"color: {C.TEXT_DIM}; border: 1px solid {C.BORDER}; background: transparent; padding: 4px;")
         close_btn.clicked.connect(dialog.close)
-        lay.addWidget(close_btn)
+        lay.addWidget(close_btn)
         self._office_login_dialog = dialog
         self._office_login_url = ""
         dialog.show()
@@ -5533,11 +5533,8 @@ class MainWindow(QMainWindow):
                         logger=lambda m: self._log_sig.emit(f"SYS: {m}"))
                 except Exception as e:
                     ok, msg = False, str(e)
-                if ok and self.on_wake_toggle:
-                    try:
-                        self.on_wake_toggle(True)   # auto-enable after a successful download
-                    except Exception:
-                        pass
+                # The completion signal is handled on the Qt thread, so UI state
+                # is never changed directly from this worker thread.
                 self._wake_dl_sig.emit(ok, msg)
             threading.Thread(target=_work, daemon=True).start()
             return
@@ -5551,6 +5548,13 @@ class MainWindow(QMainWindow):
 
     def _on_wake_install_done(self, ok: bool, msg: str):
         self._log_sig.emit(f"SYS: {'Wake word ready.' if ok else 'Wake word setup failed: ' + msg}")
+        if ok and self.on_wake_toggle:
+            try:
+                result = self.on_wake_toggle(True)
+                if result != "enabled":
+                    self._log_sig.emit("SYS: Wake word files are installed, but detection did not start. It remains disabled.")
+            except Exception as exc:
+                self._log_sig.emit(f"SYS: Wake word could not be enabled: {exc}")
         self._refresh_wake_btns()
 
     def _tap_wake_manual(self):

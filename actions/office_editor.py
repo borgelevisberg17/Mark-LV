@@ -668,6 +668,141 @@ def _create_epub(params: dict) -> str:
     return f"Created structured EPUB: {output}\nChapters: {len(chapters)}\nCover: {'included' if cover_path else 'not provided'}\nValidation: package/XML/internal links passed; {epubcheck_status}."
 
 
+
+def _active_word_document():
+    """Return the document already active in Word; never launch a second Word instance."""
+    import platform
+
+    if platform.system() != "Windows":
+        raise RuntimeError("Live Word document control is available only on Windows.")
+    try:
+        from win32com.client import GetActiveObject
+        app = GetActiveObject("Word.Application")
+        document = app.ActiveDocument
+    except Exception as exc:
+        raise RuntimeError(
+            "No active Microsoft Word document was found. Open the target document in Word first."
+        ) from exc
+    if document is None:
+        raise RuntimeError("Microsoft Word has no active document.")
+    if bool(getattr(document, "ReadOnly", False)):
+        raise RuntimeError("The active Word document is read-only; no changes were made.")
+    return document
+
+
+def _active_word_edit(params: dict) -> str:
+    """Edit the document already open in Word through Word's native object model."""
+    document = _active_word_document()
+    operation = str(params.get("operation", "")).strip().lower()
+    full_name = str(getattr(document, "FullName", "") or "")
+    saved_path = Path(full_name) if full_name and Path(full_name).is_absolute() else None
+
+    if operation == "active_word_replace_text":
+        old = params.get("old_text")
+        new = params.get("new_text", "")
+        if not isinstance(old, str) or not old:
+            raise ValueError("old_text must be a non-empty string.")
+        if not isinstance(new, str):
+            raise ValueError("new_text must be a string.")
+        if len(old) > 10000 or len(new) > 10000:
+            raise ValueError("Replacement strings are limited to 10,000 characters.")
+        if old == new:
+            return "No change requested: old_text and new_text are identical."
+        if saved_path is None or not saved_path.exists():
+            raise RuntimeError(
+                "The active document has no verified saved path. Save it in Word first; no replacement was made."
+            )
+        before = str(document.Content.Text)
+        expected = before.count(old)
+        if expected == 0:
+            return "No matching text was found in the active Word document; it was left unchanged."
+        finder = document.Content.Find
+        finder.ClearFormatting()
+        finder.Replacement.ClearFormatting()
+        finder.Text = old
+        finder.Replacement.Text = new
+        finder.Forward = True
+        finder.Wrap = 1  # wdFindContinue
+        finder.Format = False
+        finder.MatchCase = False
+        finder.MatchWholeWord = False
+        finder.MatchWildcards = False
+        finder.Execute(Replace=2)  # wdReplaceAll
+        after = str(document.Content.Text)
+        if after == before:
+            return "Word reported no effective replacement; the active document was not saved."
+        document.Save()
+        remaining = after.count(old)
+        return (
+            f"Edited the active Word document in place: {saved_path}\n"
+            f"Replaced approximately {max(expected - remaining, 0)} occurrence(s).\n"
+            "The same Word window remains open; no edited copy was created."
+        )
+
+    if operation == "active_word_append_content":
+        text_value = params.get("text", "")
+        if not isinstance(text_value, str) or not text_value.strip():
+            raise ValueError("text must be a non-empty string for active_word_append_content.")
+        if len(text_value) > 100000:
+            raise ValueError("Appended content is limited to 100,000 characters.")
+        if saved_path is None or not saved_path.exists():
+            raise RuntimeError(
+                "The active document has no verified saved path. Save it in Word first; no content was appended."
+            )
+        insert_range = document.Range(document.Content.End - 1, document.Content.End - 1)
+        insert_range.InsertAfter("\r" + text_value.replace("\r\n", "\n").replace("\n", "\r"))
+        document.Save()
+        return (
+            f"Appended content directly to the active Word document: {saved_path}\n"
+            "The document was saved in place and remains open; no duplicate was created."
+        )
+
+    if operation == "active_word_rename_document":
+        current_name = str(getattr(document, "Name", "") or "")
+        extension = (saved_path.suffix.lower() if saved_path else Path(current_name).suffix.lower())
+        if extension not in {".docx", ".doc", ".docm", ".rtf"}:
+            raise ValueError(
+                f"Renaming the active Word document is supported for DOCX, DOC, DOCM and RTF files, not {extension or 'an unsaved document'}."
+            )
+        requested = str(params.get("filename", "") or "").strip()
+        if not requested:
+            raise ValueError("filename is required for active_word_rename_document.")
+        filename = safe_filename(requested, saved_path.stem if saved_path else "Document", extension)
+        if params.get("output_dir"):
+            directory = safe_output_directory(str(params.get("output_dir")))
+        elif saved_path:
+            directory = resolve_user_path(
+                saved_path.parent, roots=user_accessible_roots(), must_exist=True
+            )
+        else:
+            directory = safe_output_directory("")
+        destination = (directory / filename).resolve()
+        destination = resolve_user_path(destination, roots=user_accessible_roots())
+        if saved_path and os.path.normcase(str(destination)) == os.path.normcase(str(saved_path.resolve())):
+            return f"The active document already has that filename: {saved_path}"
+        if destination.exists():
+            raise FileExistsError(f"Refusing to overwrite an existing file: {destination}")
+        document.SaveAs2(FileName=str(destination))
+        actual_name = Path(str(getattr(document, "FullName", "") or destination)).resolve()
+        if not destination.is_file() or os.path.normcase(str(actual_name)) != os.path.normcase(str(destination)):
+            raise RuntimeError("Word did not confirm the new document path; the rename was not verified.")
+        if saved_path and saved_path.exists():
+            try:
+                saved_path.unlink()
+            except OSError as exc:
+                return (
+                    f"Word saved and kept the document open as {destination}, but the old file "
+                    f"could not be removed ({exc}). Both files may remain; check before continuing."
+                )
+        return (
+            f"Renamed the active Word document to: {destination}\n"
+            "Verified the new file exists. Word remains open on the renamed document."
+        )
+
+    raise ValueError(f"Unsupported active Word operation: {operation}")
+
+
+
 def office_editor(parameters: dict, player=None, speak=None) -> str:
     params = parameters or {}
     operation = str(params.get("operation", "")).strip().lower()
@@ -676,6 +811,8 @@ def office_editor(parameters: dict, player=None, speak=None) -> str:
             return _docx_edit(params)
         if operation in {"set_cells", "set_formulas", "format_cells", "append_rows", "add_sheet", "rename_sheet"}:
             return _xlsx_edit(params)
+        if operation in {"active_word_replace_text", "active_word_append_content", "active_word_rename_document"}:
+            return _active_word_edit(params)
         if operation in {"replace_shape_text", "append_slides"}:
             return _pptx_edit(params)
         if operation == "create_epub":
@@ -697,7 +834,7 @@ TOOL = {
         "plus structured multi-chapter EPUB publishing with metadata and structural validation. Operations: replace_text across DOCX runs, "
         "append_content (paragraphs/headings/bullets/numbers/page breaks), add_toc (inserts a Word TOC field; user must update it in Word), "
         "add_references, insert_cover, set_cells, set_formulas, format_cells, append_rows, add_sheet, rename_sheet, replace_shape_text, append_slides, create_epub. "
-        "Existing source files are preserved by default and an edited copy is created. Only set in_place=true when the user explicitly asks to overwrite the source. "
+        "Existing source files are preserved by default and an edited copy is created for file-based operations. For an already-open Microsoft Word document on Windows, use active_word_replace_text, active_word_append_content, or active_word_rename_document to operate through the existing Word instance without closing it or creating repeated edited copies. "
         "DOCX replacements preserve unaffected run formatting and search supported body, table, header and footer paragraphs. "
         "XLSX/XLSM supports literal cell edits, explicit formulas, formatting, row append and sheet create/rename; it refuses charts, drawings, pivots, external links and embedded parts by default because openpyxl may drop them. "
         "PPTX replacement clears stale paragraphs and retains first-paragraph formatting. EPUB output validates XML, manifest/spine and local links, and runs official EPUBCheck automatically when installed. "
@@ -706,14 +843,14 @@ TOOL = {
     "parameters": {
         "type": "OBJECT",
         "properties": {
-            "operation": {"type": "STRING", "description": "replace_text | append_content | add_toc | add_references | insert_cover | set_cells | set_formulas | format_cells | append_rows | add_sheet | rename_sheet | replace_shape_text | append_slides | create_epub"},
+            "operation": {"type": "STRING", "description": "replace_text | append_content | add_toc | add_references | insert_cover | set_cells | set_formulas | format_cells | append_rows | add_sheet | rename_sheet | replace_shape_text | append_slides | create_epub | active_word_replace_text | active_word_append_content | active_word_rename_document"},
             "file_path": {"type": "STRING", "description": "Existing DOCX/XLSX/XLSM/PPTX source file path"},
             "in_place": {"type": "BOOLEAN", "description": "Default false: save a new edited copy and preserve source. Set true only with explicit user authorization to overwrite."},
             "allow_unsupported_features": {"type": "BOOLEAN", "description": "XLSX/XLSM only: accept possible loss of chart, drawing, pivot, external-link or embedded features. Never set without explicit user authorization to accept that risk."},
             "output_dir": {"type": "STRING", "description": "Optional output directory within the permitted user roots"},
-            "filename": {"type": "STRING", "description": "Optional output filename only"},
-            "old_text": {"type": "STRING", "description": "replace_text: text to replace inside a single DOCX run"},
-            "new_text": {"type": "STRING", "description": "replace_text: replacement text"},
+            "filename": {"type": "STRING", "description": "Optional output filename only; active_word_rename_document: new filename for the document already open in Word, without directories"},
+            "old_text": {"type": "STRING", "description": "replace_text: text to replace inside DOCX runs; active_word_replace_text: text to replace throughout the currently open Word document"},
+            "new_text": {"type": "STRING", "description": "replace_text or active_word_replace_text: replacement text"},
             "blocks": {"type": "ARRAY", "items": {"type": "OBJECT"}, "description": "append_content: objects with type paragraph|heading|title|page_break|bullet|number, text, and optional heading level"},
             "heading": {"type": "STRING", "description": "Optional heading for table of contents or bibliography"},
             "references": {"type": "ARRAY", "items": {"type": "STRING"}, "description": "add_references: bibliography entries"},
@@ -727,7 +864,7 @@ TOOL = {
             "new_sheet_name": {"type": "STRING", "description": "add_sheet: new worksheet name"},
             "slide_index": {"type": "INTEGER", "description": "replace_shape_text: zero-based slide index"},
             "shape_index": {"type": "INTEGER", "description": "replace_shape_text: zero-based shape index"},
-            "text": {"type": "STRING", "description": "replace_shape_text: replacement text"},
+            "text": {"type": "STRING", "description": "replace_shape_text: replacement text; active_word_append_content: text to append to the currently open Word document"},
             "slides": {"type": "ARRAY", "items": {"type": "OBJECT"}, "description": "append_slides: slide objects with title, optional body and bullets"},
             "title": {"type": "STRING", "description": "create_epub: book title"},
             "chapters": {"type": "ARRAY", "items": {"type": "OBJECT"}, "description": "create_epub: chapter objects with title and content strings"},
