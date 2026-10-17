@@ -44,7 +44,7 @@ function executeOnPage(action, p) {
       case "smart_click": {
         const q = String(p.description || "").trim();
         if (!q) return "Could not find a visible button or link: empty description.";
-        const normalize = value => String(value || "").replace(/\\s+/g, " ").trim().toLocaleLowerCase();
+        const normalize = value => String(value || "").replace(/\s+/g, " ").trim().toLocaleLowerCase();
         const describeTarget = el => normalize(el.getAttribute("aria-label") || el.title || el.innerText || el.textContent || el.value);
         const all = [...document.querySelectorAll("button,a,[role=button],input[type=submit]")].filter(visible);
         const exact = [...new Set(all.filter(el => describeTarget(el) === normalize(q)))];
