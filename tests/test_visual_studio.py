@@ -96,6 +96,62 @@ class VisualStudioOfficeInsertionTests(unittest.TestCase):
             self.assertTrue(source.is_file())
             self.assertGreaterEqual(len(reopened.inline_shapes), 1)
 
+    def test_inline_illustration_can_follow_anchor_and_include_alt_text(self):
+        from PIL import Image
+        from docx import Document
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            image_path = root / "diagram.png"
+            Image.new("RGB", (300, 200), "white").save(image_path)
+            source = root / "report.docx"
+            document = Document()
+            document.add_paragraph("Architecture overview")
+            document.add_paragraph("This paragraph follows the anchor.")
+            document.save(source)
+
+            output = _insert_docx(
+                image_path, str(source), insertion_mode="inline",
+                caption="Architecture diagram", insert_after_text="Architecture overview",
+                alt_text="Diagram showing the system architecture",
+            )
+            reopened = Document(output)
+            paragraphs = reopened.paragraphs
+            anchor_index = next(i for i, p in enumerate(paragraphs) if p.text == "Architecture overview")
+            caption_index = next(i for i, p in enumerate(paragraphs) if p.text == "Architecture diagram")
+            following_index = next(i for i, p in enumerate(paragraphs) if p.text == "This paragraph follows the anchor.")
+            self.assertLess(anchor_index, caption_index)
+            self.assertLess(caption_index, following_index)
+            self.assertEqual(reopened.inline_shapes[0]._inline.docPr.get("descr"), "Diagram showing the system architecture")
+            self.assertTrue(source.is_file())
+
+    def test_pptx_replaces_picture_in_place_and_sets_alt_text(self):
+        from PIL import Image
+        from pptx import Presentation
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            old_image = root / "old.png"
+            new_image = root / "new.png"
+            Image.new("RGB", (160, 90), "white").save(old_image)
+            Image.new("RGB", (90, 160), "black").save(new_image)
+            source = root / "deck.pptx"
+            presentation = Presentation()
+            slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+            slide.shapes.add_picture(str(old_image), 100000, 200000, width=3000000, height=1700000)
+            presentation.save(source)
+
+            output = _insert_pptx(
+                new_image, str(source), slide_index=0, placement="replace_picture",
+                shape_index=0, alt_text="Updated product illustration",
+            )
+            reopened = Presentation(output)
+            shapes = reopened.slides[0].shapes
+            self.assertEqual(len(shapes), 1)
+            self.assertEqual(shapes[0].shape_type, 13)
+            self.assertEqual(shapes[0]._element.nvPicPr.cNvPr.get("descr"), "Updated product illustration")
+            self.assertTrue(source.is_file())
+
     def test_insert_pptx_appends_visual_slide_and_preserves_source(self):
         from PIL import Image
         from pptx import Presentation
