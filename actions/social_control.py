@@ -515,7 +515,9 @@ def social_control(parameters=None, player=None, response=None, session_memory=N
                 + ". Availability means a UI flow is configured, not that it has passed live validation."
             )
         if action == "open":
-            mode = str(params.get("mode", "browser")).lower()
+            mode = str(params.get("mode", "browser")).strip().lower()
+            if mode not in {"browser", "app", "desktop"}:
+                return "Unsupported mode. Use browser, app, or desktop."
             if mode in {"app", "desktop"}:
                 from actions.open_app import open_app
                 result = open_app(parameters={"app_name": platform["app"]}, player=player)
