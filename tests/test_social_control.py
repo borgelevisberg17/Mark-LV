@@ -137,3 +137,38 @@ def test_desktop_send_never_clicks_send_if_preparation_fails():
         else:
             raise AssertionError("Unverified preparation must stop before sending")
         click.assert_not_called()
+
+
+def test_desktop_send_requires_message_in_history_and_cleared_composer():
+    platform = social._PLATFORMS["whatsapp"]
+    verified = {
+        "visible_text": "Alice\\nHello",
+        "active_conversation_title": "Alice",
+        "message_composer_text": "",
+        "visible_controls": [],
+    }
+    with patch.object(social, "_desktop_prepare_message", return_value="Draft prepared"), \\
+         patch.object(social, "_desktop_click") as click, \\
+         patch.object(social, "_desktop_snapshot", return_value=verified):
+        result = social._desktop_send_message(platform, "Alice", "Hello")
+    assert "does not prove server receipt" in result
+    click.assert_called_once_with("send message button", platform)
+
+
+def test_desktop_send_fails_if_text_remains_in_composer():
+    platform = social._PLATFORMS["whatsapp"]
+    still_draft = {
+        "visible_text": "Alice\\nHello",
+        "active_conversation_title": "Alice",
+        "message_composer_text": "Hello",
+        "visible_controls": [],
+    }
+    with patch.object(social, "_desktop_prepare_message", return_value="Draft prepared"), \\
+         patch.object(social, "_desktop_click"), \\
+         patch.object(social, "_desktop_snapshot", return_value=still_draft):
+        try:
+            social._desktop_send_message(platform, "Alice", "Hello")
+        except RuntimeError as exc:
+            assert "composer cleared" in str(exc)
+        else:
+            raise AssertionError("A still-populated composer must not be treated as a sent message")
