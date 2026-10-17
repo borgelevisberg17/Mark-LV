@@ -226,9 +226,13 @@ def _desktop_window(platform: dict):
         try:
             title = (window.window_text() or "").strip()
             process_name = psutil.Process(window.process_id()).name().casefold()
+            process_slug = re.sub(r"[^a-z0-9]", "", process_name.rsplit(".", 1)[0])
+            expected_slug = re.sub(r"[^a-z0-9]", "", expected)
+            app_process_matches = expected_slug in process_slug or process_name == "msedge_proxy.exe"
             if (
                 title and expected in title.casefold()
                 and process_name not in browser_processes
+                and app_process_matches
                 and window.is_visible() and window.is_enabled()
             ):
                 matches.append(window)
@@ -268,6 +272,11 @@ def _uia_controls(window) -> list[dict]:
         try:
             if not control.is_visible() or not control.is_enabled():
                 continue
+            try:
+                if control.is_offscreen():
+                    continue
+            except Exception:
+                pass
             rect = control.rectangle()
             if rect.width() <= 0 or rect.height() <= 0:
                 continue
