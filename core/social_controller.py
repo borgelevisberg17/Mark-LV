@@ -15,6 +15,7 @@ from typing import Any, Mapping, Protocol, Sequence
 class SocialAction(str, Enum):
     LIST_CONVERSATIONS = "list_conversations"
     READ_MESSAGES = "read_messages"
+    INSPECT_VISIBLE_PAGE = "inspect_visible_page"
     DRAFT_MESSAGE = "draft_message"
     SEND_MESSAGE = "send_message"
     LIST_GROUPS = "list_groups"
