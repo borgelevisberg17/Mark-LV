@@ -150,6 +150,15 @@ def _must_succeed(result: str, operation: str) -> None:
         raise RuntimeError(f"{operation} was not confirmed by the UI: {result[:240]}")
 
 
+def _can_retry_locator_failure(result: str) -> bool:
+    """Only retry when the bridge explicitly reports that no target was found."""
+    lowered = result.strip().lower()
+    return any(token in lowered for token in (
+        "could not find", "could not locate", "no matching element",
+        "no element found", "element not found", "locator matched 0",
+    ))
+
+
 def _click_first(labels: tuple[str, ...]) -> str:
     if not labels:
         raise RuntimeError("This platform has no configured UI control for that action.")
@@ -160,8 +169,13 @@ def _click_first(labels: tuple[str, ...]) -> str:
             _must_succeed(last, f"Click '{label}'")
             return last
         except RuntimeError:
-            continue
-    raise RuntimeError(f"Could not locate a supported control. Last result: {last[:180]}")
+            if _can_retry_locator_failure(last):
+                continue
+            raise RuntimeError(
+                f"Click outcome for '{label}' is uncertain; refusing to try another label "
+                f"to avoid a duplicate or unintended action: {last[:180]}"
+            )
+    raise RuntimeError(f"Could not locate a supported control without clicking. Last result: {last[:180]}")
 
 
 def _type_first(labels: tuple[str, ...], text: str) -> str:
@@ -174,15 +188,26 @@ def _type_first(labels: tuple[str, ...], text: str) -> str:
             _must_succeed(last, f"Type into '{label}'")
             return last
         except RuntimeError:
-            continue
-    raise RuntimeError(f"Could not locate a supported input. Last result: {last[:180]}")
+            if _can_retry_locator_failure(last):
+                continue
+            raise RuntimeError(
+                f"Typing outcome for '{label}' is uncertain; refusing to type into another field: {last[:180]}"
+            )
+    raise RuntimeError(f"Could not locate a supported input without typing. Last result: {last[:180]}")
+
+
+def _validate_message_request(recipient: str, message: str) -> tuple[str, str]:
+    recipient = str(recipient or "").strip()
+    message = str(message or "")
+    if not recipient or len(recipient) > 160 or any(ord(char) < 32 for char in recipient):
+        raise ValueError("A valid contact or conversation name (1–160 printable characters) is required.")
+    if not message.strip() or len(message) > _MAX_MESSAGE or "\x00" in message:
+        raise ValueError(f"Message must contain 1–{_MAX_MESSAGE} characters and no NUL bytes.")
+    return recipient, message
 
 
 def _prepare_message(platform: dict, recipient: str, message: str) -> str:
-    if not recipient or len(recipient.strip()) > 160:
-        raise ValueError("A valid contact or conversation name is required.")
-    if not message or not message.strip() or len(message) > _MAX_MESSAGE:
-        raise ValueError(f"Message must contain 1–{_MAX_MESSAGE} characters.")
+    recipient, message = _validate_message_request(recipient, message)
     url, _ = _checked_page(platform)
     # Resolve through the visible search UI rather than trusting a sidebar mention
     # or an old chat message as proof that the intended conversation is active.
@@ -426,10 +451,7 @@ def _desktop_type(platform: dict, text: str) -> str:
 
 
 def _desktop_prepare_message(platform: dict, recipient: str, message: str) -> str:
-    if not recipient or len(recipient.strip()) > 160:
-        raise ValueError("A valid contact or conversation name is required.")
-    if not message or not message.strip() or len(message) > _MAX_MESSAGE:
-        raise ValueError(f"Message must contain 1–{_MAX_MESSAGE} characters.")
+    recipient, message = _validate_message_request(recipient, message)
     window = _desktop_window(platform)
     try:
         window.set_focus()
@@ -480,11 +502,17 @@ def social_control(parameters=None, player=None, response=None, session_memory=N
         action = str(params.get("action", "inspect")).strip().lower()
         key, platform = _platform(params.get("platform", ""))
         if action == "capabilities":
+            supported = ["open", "inspect", "capabilities", "plan", "prepare_message", "send_message"]
+            if platform["call"]:
+                supported.append("start_call")
+            if platform["video_call"]:
+                supported.append("start_video_call")
+            if platform["end_call"]:
+                supported.append("end_call")
             return (
-                f"{key}: local UI only; no social-network API. Supported here: open, "
-                "inspect, prepare_message, send_message, start_call, start_video_call, "
-                "end_call. Browser mode checks an exact HTTPS host; installed-app mode "
-                "uses local Windows UI Automation and stops on ambiguous controls."
+                f"{key}: local UI only; no social-network API. Configured actions: "
+                + ", ".join(supported)
+                + ". Availability means a UI flow is configured, not that it has passed live validation."
             )
         if action == "open":
             mode = str(params.get("mode", "browser")).lower()
@@ -500,7 +528,45 @@ def social_control(parameters=None, player=None, response=None, session_memory=N
                 return result + " Sign in manually if required; no credentials were accessed."
             return f"Could not confirm platform opened: {result}"
         mode = str(params.get("mode", "browser")).strip().lower()
+        if mode not in {"browser", "app", "desktop"}:
+            return "Unsupported mode. Use browser, app, or desktop."
         desktop_mode = mode in {"app", "desktop"}
+        if action == "plan":
+            target_action = str(params.get("target_action", "")).strip().lower()
+            allowed = {"inspect", "prepare_message", "send_message", "start_call", "start_video_call", "end_call"}
+            if target_action not in allowed:
+                return "A valid target_action is required: " + ", ".join(sorted(allowed))
+            if target_action in {"prepare_message", "send_message"}:
+                recipient, message = _validate_message_request(params.get("recipient", ""), params.get("message", ""))
+            if target_action in {"start_call", "start_video_call", "end_call"}:
+                if not str(params.get("recipient", "")).strip():
+                    return "A recipient/contact is required so the correct conversation can be verified before a call action."
+                if not platform.get({"start_call": "call", "start_video_call": "video_call", "end_call": "end_call"}[target_action]):
+                    return f"{target_action} is not configured for {key}; no UI action was attempted."
+            stages = [
+                "1. Preflight: confirm platform/mode and validate required inputs.",
+                "2. Session: verify exact HTTPS host (browser) or uniquely identified app window (desktop).",
+                "3. Target: search in the visible UI and stop on zero or multiple plausible matches.",
+                "4. Review: verify the active conversation and exact draft before any external effect.",
+            ]
+            if target_action == "send_message":
+                stages += [
+                    "5. Approval: show platform, recipient, full message, and mode for explicit approval.",
+                    "6. Send once: never retry a send after an uncertain click/timeout.",
+                    "7. Verify: check composer cleared and exact text appears in history; do not claim delivery/read receipt.",
+                ]
+            elif target_action in {"start_call", "start_video_call", "end_call"}:
+                stages += [
+                    "5. Approval: show the exact contact and requested call action.",
+                    "6. Execute once and inspect resulting UI; do not repeat an uncertain click.",
+                    "7. Ask for manual intervention if call state is not unambiguous.",
+                ]
+            elif target_action == "prepare_message":
+                stages += [
+                    "5. Fill the composer only after the contact is verified.",
+                    "6. Read back the exact draft; do not send.",
+                ]
+            return f"Safe plan for {target_action} on {key} ({mode} mode):\n" + "\n".join(stages) + "\nKnown limitation: generic visible text can be ambiguous; if the UI does not expose reliable state, stop and ask for manual intervention."
         if action == "inspect":
             if desktop_mode:
                 state = _desktop_snapshot(platform)
@@ -520,8 +586,10 @@ def social_control(parameters=None, player=None, response=None, session_memory=N
             recipient = str(params.get("recipient", "")).strip()
             message = str(params.get("message", ""))
             if action == "send_message":
-                if not recipient or not message.strip():
-                    return "A recipient and non-empty message are required. Nothing was sent."
+                try:
+                    recipient, message = _validate_message_request(recipient, message)
+                except ValueError as exc:
+                    return f"{exc} Nothing was sent."
                 title = f"Send {key} message to {recipient}"
                 detail = (
                     f"Platform: {key}\nRecipient: {recipient}\nMessage:\n{message}\n"
@@ -546,6 +614,10 @@ def social_control(parameters=None, player=None, response=None, session_memory=N
                     "start_video_call": "video_call",
                     "end_call": "end_call",
                 }[action]
+                if not recipient:
+                    return "A recipient/contact is required for call controls so the active conversation can be verified. No action was taken."
+                if not platform.get(control_action):
+                    return f"{action} is not configured for {key}. No action was taken."
                 title = f"{action.replace('_', ' ')} on {key}"
                 detail = (
                     f"Platform: {key}\nRequested UI action: {control_action}\n"
@@ -596,7 +668,7 @@ TOOL = {
     "description": (
         "Controls supported social platforms through the user's local installed app "
         "or existing authenticated Edge UI, without social-network APIs. Use actions "
-        "open, inspect, capabilities, prepare_message, send_message, start_call, "
+        "open, inspect, capabilities, plan, prepare_message, send_message, start_call, "
         "start_video_call, end_call. Side effects require visible human approval. "
         "Never claim delivery/read status unless the UI verifies it."
     ),
@@ -604,7 +676,8 @@ TOOL = {
         "type": "OBJECT",
         "properties": {
             "platform": {"type": "STRING", "description": "whatsapp, telegram, discord, instagram, messenger, slack, teams"},
-            "action": {"type": "STRING", "description": "open | inspect | capabilities | prepare_message | send_message | start_call | start_video_call | end_call"},
+            "action": {"type": "STRING", "description": "open | inspect | capabilities | plan | prepare_message | send_message | start_call | start_video_call | end_call"},
+            "target_action": {"type": "STRING", "description": "Action to produce a safe scenario plan for when action=plan"},
             "mode": {"type": "STRING", "description": "browser (default) for authenticated Edge UI; app or desktop for installed desktop UI"},
             "recipient": {"type": "STRING", "description": "Exact visible contact or conversation name"},
             "message": {"type": "STRING", "description": "Message text; only used for prepare_message/send_message"},
