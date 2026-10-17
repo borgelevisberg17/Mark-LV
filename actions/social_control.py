@@ -464,7 +464,7 @@ def social_control(parameters=None, player=None, response=None, session_memory=N
             )
         if action == "open":
             mode = str(params.get("mode", "browser")).lower()
-            if mode == "app":
+            if mode in {"app", "desktop"}:
                 from actions.open_app import open_app
                 result = open_app(parameters={"app_name": platform["app"]}, player=player)
                 if "could not" in result.lower() or "failed" in result.lower() or "not in the approved" in result.lower():
