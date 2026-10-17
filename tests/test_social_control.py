@@ -1,7 +1,7 @@
 """Unit tests for the API-free social UI controller."""
 import importlib.util
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "actions" / "social_control.py"
 SPEC = importlib.util.spec_from_file_location("social_control_test_module", MODULE_PATH)
@@ -94,7 +94,7 @@ def test_desktop_prepare_stops_when_active_header_does_not_match():
         {"visible_text": "Alice Bob", "active_conversation_title": "", "message_composer_text": "", "visible_controls": []},
         {"visible_text": "Chat with Alice", "active_conversation_title": "Alice", "message_composer_text": "", "visible_controls": []},
     ]
-    with patch.object(social, "_desktop_window", return_value=object()), \
+    with patch.object(social, "_desktop_window", return_value=MagicMock()), \
          patch.object(social, "_desktop_snapshot", side_effect=snapshots), \
          patch.object(social, "_desktop_click") as click, \
          patch.object(social, "_desktop_type") as type_text:
