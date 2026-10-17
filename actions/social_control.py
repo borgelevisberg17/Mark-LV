@@ -202,6 +202,134 @@ def _prepare_message(platform: dict, recipient: str, message: str) -> str:
     )
 
 
+def _desktop_control(action: str, **kwargs) -> str:
+    """Use the existing local desktop action; never invokes a social API."""
+    from actions.computer_control import computer_control
+    return str(computer_control(parameters={"action": action, **kwargs}) or "")
+
+
+def _desktop_snapshot(platform: dict) -> dict:
+    """Read only the visible desktop screenshot using the existing Gemini client."""
+    try:
+        import io
+        import json
+        import pyautogui
+        from google.genai import types as gtypes
+    except ImportError as exc:
+        raise RuntimeError(f"Desktop visual inspection dependency unavailable: {exc}") from exc
+    image = pyautogui.screenshot()
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    from core import gemini
+    prompt = (
+        "Inspect this screenshot of a desktop application. Extract only text and controls "
+        "that are visibly readable; do not infer hidden state. Return ONLY valid JSON with "
+        "keys active_conversation_title (string or empty), visible_text (string), "
+        "message_composer_text (string or empty), and visible_controls (array of strings). "
+        "For active_conversation_title, use only the clear title/header of the currently "
+        "open conversation, not search results, sidebar entries, or old messages. If uncertain, "
+        "return an empty string. Do not include credentials or speculate. "
+        f"Target application: {platform['app']}."
+    )
+    response = gemini.call(
+        [gtypes.Part.from_bytes(data=buffer.getvalue(), mime_type="image/png"), prompt],
+        tier=gemini.FAST, timeout_ms=20_000,
+    )
+    if response is None:
+        raise RuntimeError("Visual inspection did not return a result; no action was taken.")
+    raw = (response.text or "").strip()
+    try:
+        result = json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("Visual inspection returned unreadable structured data; no action was taken.") from exc
+    if not isinstance(result, dict) or not isinstance(result.get("visible_text"), str):
+        raise RuntimeError("Visual inspection did not provide visible text; no action was taken.")
+    result["active_conversation_title"] = str(result.get("active_conversation_title") or "").strip()
+    result["message_composer_text"] = str(result.get("message_composer_text") or "").strip()
+    result["visible_controls"] = result.get("visible_controls") if isinstance(result.get("visible_controls"), list) else []
+    result["visible_text"] = result["visible_text"][:_MAX_PAGE_TEXT]
+    return result
+
+
+def _desktop_find(description: str) -> tuple[int, int]:
+    """Locate one visible UI element and reject coordinates outside the current screen."""
+    result = _desktop_control("screen_find", description=description).strip()
+    match = re.fullmatch(r"(\d+)\s*,\s*(\d+)", result)
+    if not match:
+        raise RuntimeError(f"Could not locate '{description}' on the desktop; no action was taken.")
+    x, y = int(match.group(1)), int(match.group(2))
+    try:
+        import pyautogui
+        width, height = pyautogui.size()
+    except ImportError as exc:
+        raise RuntimeError("PyAutoGUI is required for desktop interaction.") from exc
+    if not (0 <= x < width and 0 <= y < height):
+        raise RuntimeError("The visual locator returned out-of-screen coordinates; no action was taken.")
+    return x, y
+
+
+def _desktop_click(description: str) -> str:
+    x, y = _desktop_find(description)
+    result = _desktop_control("click", x=x, y=y)
+    _must_succeed(result, f"Click desktop element '{description}'")
+    return result
+
+
+def _desktop_type(text: str) -> str:
+    result = _desktop_control("smart_type", text=text, clear_first=True)
+    _must_succeed(result, "Type into desktop field")
+    return result
+
+
+def _desktop_prepare_message(platform: dict, recipient: str, message: str) -> str:
+    if not recipient or len(recipient.strip()) > 160:
+        raise ValueError("A valid contact or conversation name is required.")
+    if not message or not message.strip() or len(message) > _MAX_MESSAGE:
+        raise ValueError(f"Message must contain 1–{_MAX_MESSAGE} characters.")
+    focus = _desktop_control("focus_window", title=platform["app"])
+    if any(token in focus.lower() for token in ("failed", "requires", "unknown os")):
+        raise RuntimeError(f"Could not focus the {platform['app']} window: {focus}")
+    initial = _desktop_snapshot(platform)
+    if not initial["visible_text"].strip():
+        raise RuntimeError("The app window has no readable visible text; no action was taken.")
+    _desktop_click("search field")
+    _desktop_type(recipient)
+    search_state = _desktop_snapshot(platform)
+    if recipient.casefold() not in search_state["visible_text"].casefold():
+        raise RuntimeError("The requested contact is not visible in desktop search results; nothing was composed.")
+    _desktop_click(f"search result named {recipient}")
+    selected = _desktop_snapshot(platform)
+    header = selected["active_conversation_title"]
+    if not header or recipient.casefold() not in header.casefold():
+        raise RuntimeError(
+            "The active conversation header could not be verified as the requested recipient. "
+            "No message was composed or sent."
+        )
+    _desktop_click("message composer")
+    _desktop_type(message)
+    drafted = _desktop_snapshot(platform)
+    if message not in drafted["message_composer_text"]:
+        raise RuntimeError("The exact draft could not be verified in the message composer; it was not sent.")
+    return (
+        f"Draft prepared in the {platform['app']} desktop UI for '{recipient}'. "
+        "The active conversation header and exact draft were visually checked. Review before sending."
+    )
+
+
+def _desktop_send_message(platform: dict, recipient: str, message: str) -> str:
+    prepared = _desktop_prepare_message(platform, recipient, message)
+    if "draft prepared" not in prepared.lower():
+        raise RuntimeError("Desktop message preparation was not verified.")
+    _desktop_click("Send message button")
+    after = _desktop_snapshot(platform)
+    if message not in after["visible_text"]:
+        raise RuntimeError("The exact message was not visible after clicking Send; delivery is unconfirmed.")
+    return (
+        f"The desktop UI shows the exact message after Send in {platform['app']}. "
+        "This does not prove server receipt, delivery, or read status."
+    )
+
+
 def social_control(parameters=None, player=None, response=None, session_memory=None) -> str:
     params = parameters or {}
     try:
@@ -227,11 +355,22 @@ def social_control(parameters=None, player=None, response=None, session_memory=N
             if "opened" in result.lower() or "navigat" in result.lower() or "url" in result.lower():
                 return result + " Sign in manually if required; no credentials were accessed."
             return f"Could not confirm platform opened: {result}"
+        mode = str(params.get("mode", "browser")).strip().lower()
+        desktop_mode = mode in {"app", "desktop"}
         if action == "inspect":
+            if desktop_mode:
+                state = _desktop_snapshot(platform)
+                return (
+                    f"Desktop app: {platform['app']}\n"
+                    f"Active conversation header: {state['active_conversation_title'] or '(not verified)'}\n"
+                    f"Visible text (truncated):\n{state['visible_text']}\n"
+                    "This is screenshot-based extraction; uncertain text is not treated as verified."
+                )
             url, visible = _checked_page(platform)
             return f"Verified visible page: {url}\nVisible text (truncated):\n{visible}\nOnly visible page text is inspected; hidden messages and conversation meaning are not inferred."
         if action == "prepare_message":
-            return _prepare_message(platform, str(params.get("recipient", "")), str(params.get("message", "")))
+            helper = _desktop_prepare_message if desktop_mode else _prepare_message
+            return helper(platform, str(params.get("recipient", "")), str(params.get("message", "")))
         if action in {"send_message", "start_call", "start_video_call", "end_call"}:
             from core.execution import request_execution
             recipient = str(params.get("recipient", "")).strip()
@@ -247,8 +386,9 @@ def social_control(parameters=None, player=None, response=None, session_memory=N
                     "visible; the UI result is then checked. Do not approve unless correct."
                 )
                 def operation():
+                    if desktop_mode:
+                        return _desktop_send_message(platform, recipient, message)
                     prepared = _prepare_message(platform, recipient, message)
-                    # Do not send if preparation reports a mismatch or any uncertainty.
                     if "draft prepared" not in prepared.lower():
                         raise RuntimeError("Message preparation was not verified.")
                     _click_first(platform["send"])
@@ -268,6 +408,19 @@ def social_control(parameters=None, player=None, response=None, session_memory=N
                     f"Visible page must be verified before clicking. Approve only if the correct conversation is open."
                 )
                 def operation():
+                    if desktop_mode:
+                        before = _desktop_snapshot(platform)
+                        if not before["active_conversation_title"] or (
+                            recipient and recipient.casefold() not in before["active_conversation_title"].casefold()
+                        ):
+                            raise RuntimeError("The active desktop conversation header does not match the requested contact; no call control was clicked.")
+                        result = _desktop_click({
+                            "call": "Start voice call button",
+                            "video_call": "Start video call button",
+                            "end_call": "End call button",
+                        }[control_action])
+                        after = _desktop_snapshot(platform)
+                        return f"Desktop UI control clicked and screen re-read. Result: {result}. Visible text: {after['visible_text'][:1200]}. Call state still requires visual confirmation."
                     _, before = _checked_page(platform)
                     if recipient and recipient.casefold() not in before.casefold():
                         raise RuntimeError("The requested contact is not visible; no call control was clicked.")
@@ -306,7 +459,7 @@ TOOL = {
         "properties": {
             "platform": {"type": "STRING", "description": "whatsapp, telegram, discord, instagram, messenger, slack, teams"},
             "action": {"type": "STRING", "description": "open | inspect | capabilities | prepare_message | send_message | start_call | start_video_call | end_call"},
-            "mode": {"type": "STRING", "description": "For open: browser (default) or app"},
+            "mode": {"type": "STRING", "description": "browser (default) for authenticated Edge UI; app or desktop for installed desktop UI"},
             "recipient": {"type": "STRING", "description": "Exact visible contact or conversation name"},
             "message": {"type": "STRING", "description": "Message text; only used for prepare_message/send_message"},
         },
