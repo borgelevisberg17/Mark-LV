@@ -22,7 +22,7 @@ _MAX_BODY = 128 * 1024
 _ALLOWED_ACTIONS = {
     "go_to", "search", "new_tab", "click", "type", "scroll", "fill_form",
     "smart_click", "smart_type", "get_text", "get_url", "press", "close_tab",
-    "back", "forward", "reload",
+    "back", "forward", "reload", "whatsapp",
 }
 
 

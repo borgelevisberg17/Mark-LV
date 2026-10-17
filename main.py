@@ -1931,6 +1931,25 @@ class JarvisLive:
 
     # ── Background monitor ──────────────────────────────────────────────────────
 
+    async def _run_whatsapp_monitor(self) -> None:
+        """Notify locally when the opted-in WhatsApp chat gains an unread preview."""
+        from core.whatsapp_monitor import check_for_message, get_monitor, notify_message
+
+        while True:
+            try:
+                monitor = await asyncio.to_thread(get_monitor)
+                if monitor:
+                    preview = await asyncio.to_thread(check_for_message, monitor)
+                    if preview:
+                        await asyncio.to_thread(
+                            notify_message, monitor["contact"], preview, self.ui
+                        )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                print(f"[WhatsAppMonitor] Check failed: {type(exc).__name__}")
+            await asyncio.sleep(20)
+
     async def _run_background_monitor(self) -> None:
         """Check user-configured topics once per day; speak alerts when new headlines appear."""
         await asyncio.sleep(300)          # wait 5 min after startup before first check
@@ -2169,6 +2188,7 @@ class JarvisLive:
                     tg.create_task(self._play_audio())
                     tg.create_task(self._run_system_monitor())
                     tg.create_task(self._run_background_monitor())
+                    tg.create_task(self._run_whatsapp_monitor())
                     tg.create_task(self._run_proactive_mode())
                     tg.create_task(self._run_sleep_watch())
                     if self._dashboard:

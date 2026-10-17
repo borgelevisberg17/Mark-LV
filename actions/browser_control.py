@@ -1011,7 +1011,7 @@ except Exception as _bridge_error:
 _BRIDGE_ACTIONS = {
     "go_to", "search", "new_tab", "click", "type", "scroll", "fill_form",
     "smart_click", "smart_type", "get_text", "get_url", "press", "close_tab",
-    "back", "forward", "reload",
+    "back", "forward", "reload", "whatsapp",
 }
 _EDGE_NAMES = {"edge", "msedge", "microsoft edge", "ms edge"}
 

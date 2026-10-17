@@ -95,6 +95,79 @@ function executeOnPage(action, p) {
   } catch (e) { return "Browser page error: " + (e?.message || String(e)); }
 }
 
+async function executeWhatsApp(p) {
+  if (String(p.operation || "") === "open") return "Open WhatsApp Web in the active Edge tab first.";
+  if (location.protocol !== "https:" || location.hostname !== "web.whatsapp.com")
+    throw new Error("Open WhatsApp Web in the active Edge tab first.");
+  const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
+  const text = el => (el?.innerText || el?.textContent || "").trim();
+  const chatRows = () => {
+    const cells = [...document.querySelectorAll("#pane-side [data-testid=cell-frame-container]")];
+    return (cells.length ? cells : [...document.querySelectorAll("#pane-side [role=row]")]).filter(visible);
+  };
+  const operation = String(p.operation || "status");
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+  if (operation === "status") return JSON.stringify({connected: !!document.querySelector("#pane-side"), title: document.title});
+  if (operation === "list_chats") {
+    const rows = chatRows().map(text).filter(Boolean);
+    return JSON.stringify({chats: [...new Set(rows)].slice(0, Math.min(100, Math.max(1, Number(p.limit) || 30)))});
+  }
+  if (operation === "peek_chat") {
+    const name = String(p.contact || "").trim();
+    if (!name) throw new Error("A contact or group name is required.");
+    const rows = chatRows().filter(el => text(el).toLocaleLowerCase().includes(name.toLocaleLowerCase()));
+    if (rows.length !== 1) throw new Error(rows.length ? "More than one chat matches that name; use a more specific name." : "The chat is not currently visible in the WhatsApp chat list.");
+    const row = rows[0];
+    const unread = row.querySelector('[data-testid="icon-unread-count"], [aria-label*="unread" i], [aria-label*="não lida" i], [aria-label*="no leída" i]');
+    const unreadLabel = (unread?.innerText || unread?.getAttribute("aria-label") || "").match(/\d+/)?.[0];
+    return JSON.stringify({contact:name, preview:text(row).slice(0, 1500), unread:!!unread, unreadCount:unread ? Math.max(1, Number(unreadLabel) || 0) : 0});
+  }
+  const openChat = async name => {
+    const search = [...document.querySelectorAll("#side input, #side [contenteditable=true], [data-testid=chat-list-search] input")]
+      .find(el => visible(el) && !el.closest("#main"));
+    if (!search) throw new Error("WhatsApp chat search is unavailable; ensure the chat list is loaded.");
+    search.focus();
+    if ("value" in search) {
+      const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(search), "value")?.set;
+      if (setter) setter.call(search, name); else search.value = name;
+    } else search.textContent = name;
+    search.dispatchEvent(new InputEvent("input", {bubbles:true, inputType:"insertText", data:name}));
+    await sleep(900);
+    const candidates = chatRows();
+    const matches = candidates.filter(el => text(el).toLocaleLowerCase().includes(name.toLocaleLowerCase()));
+    if (matches.length !== 1) throw new Error(matches.length ? "More than one chat matches that name; use a more specific contact or group name." : "No matching WhatsApp chat was found.");
+    const match = matches[0];
+    match.click(); await sleep(500);
+  };
+  if (operation === "read_messages" || operation === "send_message") {
+    const name = String(p.contact || "").trim();
+    if (!name || name.length > 200) throw new Error("A valid contact or group name is required.");
+    await openChat(name);
+  }
+  if (operation === "read_messages") {
+    const messages = [...document.querySelectorAll("#main [data-testid=msg-container]")].filter(visible)
+      .map(el => ({text:text(el).slice(0, 2000), direction:el.querySelector(".message-out") ? "outgoing" : "incoming"}))
+      .filter(m => m.text).slice(-Math.min(100, Math.max(1, Number(p.limit) || 30)));
+    return JSON.stringify({contact:p.contact, messages});
+  }
+  if (operation === "send_message") {
+    const message = String(p.message || "");
+    if (!message.trim() || message.length > 4000) throw new Error("Message must contain 1 to 4000 characters.");
+    const box = [...document.querySelectorAll("#main [contenteditable=true]")].find(visible);
+    if (!box) throw new Error("The message composer is unavailable in this chat.");
+    box.focus(); document.execCommand("insertText", false, message);
+    await sleep(150);
+    const button = [...document.querySelectorAll("#main button")].find(el => visible(el) && /send/i.test(el.getAttribute("aria-label") || el.title || ""));
+    if (!button) throw new Error("The send button was not found; message was not sent.");
+    button.click(); await sleep(700);
+    const sent = [...document.querySelectorAll("#main [data-testid=msg-container]")]
+      .some(el => el.querySelector(".message-out") && text(el).includes(message));
+    if (!sent) throw new Error("WhatsApp did not show the outgoing message; delivery is unconfirmed.");
+    return JSON.stringify({sent:true, contact:p.contact, verified:true});
+  }
+  throw new Error("Supported operations: status, list_chats, read_messages, send_message.");
+}
+
 async function perform(command) {
   const p = command.parameters || {};
   const action = command.action;
@@ -110,6 +183,10 @@ async function perform(command) {
     await chrome.tabs.update(tab.id, {url});
     return "Navigated existing Edge tab to " + url;
   }
+  if (action === "whatsapp" && String(p.operation || "") === "open") {
+    const tab = await chrome.tabs.create({url:"https://web.whatsapp.com/", active:true});
+    return "Opened WhatsApp Web in Edge. Sign in there if needed, then ask Mark-LV to check WhatsApp status.";
+  }
   if (action === "reload" || action === "close_tab") {
     const tab = await activeTab();
     if (action === "reload") await chrome.tabs.reload(tab.id);
@@ -124,6 +201,13 @@ async function perform(command) {
       args: [action]
     });
     return String(result || action + " requested.");
+  }
+  if (action === "whatsapp") {
+    const tabs = await chrome.tabs.query({url:"https://web.whatsapp.com/*"});
+    const tab = tabs.find(t => t.id);
+    if (!tab) throw new Error("WhatsApp Web is not open in an Edge tab.");
+    const [{result}] = await chrome.scripting.executeScript({target:{tabId:tab.id}, func:executeWhatsApp, args:[p]});
+    return String(result ?? "");
   }
   const tab = await activeTab();
   const [{result}] = await chrome.scripting.executeScript({
