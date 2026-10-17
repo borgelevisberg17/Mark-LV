@@ -116,7 +116,7 @@ def test_desktop_prepare_requires_exact_composer_draft():
         {"visible_text": "Alice", "active_conversation_title": "Alice", "message_composer_text": "", "visible_controls": []},
         {"visible_text": "Alice", "active_conversation_title": "Alice", "message_composer_text": "Hello", "visible_controls": []},
     ]
-    with patch.object(social, "_desktop_window", return_value=object()), \
+    with patch.object(social, "_desktop_window", return_value=MagicMock()), \
          patch.object(social, "_desktop_snapshot", side_effect=snapshots), \
          patch.object(social, "_desktop_click") as click, \
          patch.object(social, "_desktop_type") as type_text:
