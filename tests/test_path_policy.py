@@ -29,6 +29,13 @@ class PathPolicyTests(unittest.TestCase):
                     with self.assertRaises(PathPolicyError):
                         resolve_child_path(root, candidate, roots=[root])
 
+    def test_missing_path_has_actionable_error(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "allowed"
+            root.mkdir()
+            with self.assertRaisesRegex(PathPolicyError, "Path does not exist"):
+                resolve_user_path("missing.docx", base=root, roots=[root], must_exist=True)
+
     def test_rejects_absolute_path_outside_allowed_root(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / "allowed"

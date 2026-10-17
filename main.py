@@ -536,6 +536,17 @@ def _keep_context_of(exc: BaseException) -> bool:
     return True
 
 
+def _is_live_goaway_error(exc: BaseException) -> bool:
+    """Recognize a Live API connection rotation, including nested TaskGroup errors."""
+    if isinstance(exc, BaseExceptionGroup):
+        return any(_is_live_goaway_error(sub) for sub in exc.exceptions)
+    message = f"{type(exc).__name__}: {exc}".lower()
+    return "goaway" in message or (
+        "1008" in message
+        and ("session durat" in message or "close the connection" in message)
+    )
+
+
 class JarvisLive:
     def __init__(self, ui: JarvisUI):
         self.ui             = ui
@@ -1485,6 +1496,17 @@ class JarvisLive:
             while True:
                 async for response in self.session.receive():
 
+                    # Gemini Live sends GoAway before rotating a WebSocket.
+                    # Request a context-preserving reconnect immediately instead
+                    # of waiting for the server to close the socket with 1008.
+                    _go_away = getattr(response, "go_away", None)
+                    if _go_away is not None:
+                        _time_left = getattr(_go_away, "time_left", None)
+                        print(f"[JARVIS] 🔗 Gemini Live GoAway received (time_left={_time_left}); reconnecting with context.")
+                        self.request_reconnect(keep_context=True, reason="Gemini Live connection rotation")
+                        await asyncio.sleep(0)
+                        return
+
                     # ── Session resumption ───────────────────────────────────
                     # The server sends this periodically. `resumable` goes false
                     # while a turn is mid-flight — replaying a handle from that
@@ -2211,6 +2233,15 @@ class JarvisLive:
                 # externally, which `except Exception` would miss, letting the
                 # exception escape the while-loop and causing asyncio.run() to
                 # start shutdown — resulting in "executor after shutdown" errors).
+                # A server GoAway/session-duration rotation is normal Live API
+                # lifecycle, not a quota failure. Preserve the latest resumption
+                # handle and reconnect without a traceback or long backoff.
+                if _is_live_goaway_error(e):
+                    print("[JARVIS] 🔗 Gemini Live connection rotated; resuming conversation.")
+                    self.ui.write_log("SYS: Refreshing Gemini Live connection — preserving conversation.")
+                    self._conn_backoff = 1
+                    continue
+
                 # Voluntary reconnect (voice change) — not an error. Rebuild the
                 # session immediately with no backoff and no scary logs.
                 if _is_reconnect_signal(e):

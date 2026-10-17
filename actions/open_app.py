@@ -101,6 +101,30 @@ def _launch_windows(app_name: str) -> bool:
     except Exception as e:
         print(f"[open_app] subprocess failed: {e}")
 
+    # VS Code's optional `code` shell command is often absent from PATH on
+    # Windows even when the desktop app is installed. Check only standard
+    # installation locations. Do not type "code" into Start and claim success:
+    # that fallback cannot verify that the intended application actually opened.
+    if executable.lower() == "code":
+        candidates = [
+            os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Microsoft VS Code", "Code.exe"),
+            os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "Microsoft VS Code", "Code.exe"),
+            os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"), "Microsoft VS Code", "Code.exe"),
+        ]
+        for candidate in candidates:
+            if candidate and os.path.isfile(candidate):
+                try:
+                    subprocess.Popen(
+                        [candidate], shell=False,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    )
+                    time.sleep(1.0)
+                    return True
+                except Exception as e:
+                    print(f"[open_app] VS Code launch failed at {candidate}: {e}")
+        print("[open_app] VS Code executable was not found in PATH or standard install locations.")
+        return False
+
     # Fallback is limited to an approved alias, not arbitrary model text.
     try:
         import pyautogui
