@@ -414,7 +414,7 @@ def _desktop_prepare_message(platform: dict, recipient: str, message: str) -> st
     _desktop_snapshot(platform)
     _desktop_click("search field", platform)
     _desktop_type(platform, recipient)
-    search_state = _desktop_snapshot(platform, str(params.get("recipient", "")).strip())
+    search_state = _desktop_snapshot(platform)
     if recipient.casefold() not in search_state["visible_text"].casefold():
         raise RuntimeError("The requested contact is not visible in desktop search results; nothing was composed.")
     _desktop_click(f"search result named {recipient}", platform, recipient)
