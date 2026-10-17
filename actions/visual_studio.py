@@ -515,7 +515,7 @@ def _insert_epub_cover(image_path: Path, raw_target: str, title: str = "", alt_t
             ET.SubElement(manifest, f"{{{ns['opf']}}}item", {
                 "id": page_id, "href": page_href, "media-type": "application/xhtml+xml"
             })
-            ET.SubElement(spine, f"{{{ns['opf']}}}itemref", {"idref": page_id, "linear": "yes"})
+            spine.insert(0, ET.Element(f"{{{ns['opf']}}}itemref", {"idref": page_id, "linear": "yes"}))
             for old_meta in list(metadata):
                 if old_meta.tag.rsplit("}", 1)[-1] == "meta" and old_meta.get("name") == "cover":
                     metadata.remove(old_meta)
