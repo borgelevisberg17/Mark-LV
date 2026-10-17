@@ -46,6 +46,8 @@ def _validate_epub_archive(path: Path) -> tuple[list[str], str]:
                 raise ValueError("EPUB contains duplicate archive paths; refusing ambiguous edits.")
             if names[0] != "mimetype" or infos[0].compress_type != zipfile.ZIP_STORED:
                 raise ValueError("EPUB must begin with an uncompressed mimetype entry.")
+            if infos[0].file_size != len(b"application/epub+zip"):
+                raise ValueError("EPUB mimetype entry is missing or invalid.")
             if archive.read("mimetype") != b"application/epub+zip":
                 raise ValueError("EPUB mimetype entry is missing or invalid.")
 
