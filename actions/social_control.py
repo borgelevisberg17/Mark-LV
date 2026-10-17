@@ -216,11 +216,21 @@ def _desktop_window(platform: dict):
         raise RuntimeError("pywinauto is not installed; install the project's Windows dependencies.") from exc
 
     expected = platform["app"].casefold()
+    browser_processes = {"msedge.exe", "chrome.exe", "firefox.exe", "brave.exe", "opera.exe", "vivaldi.exe"}
+    try:
+        import psutil
+    except ImportError as exc:
+        raise RuntimeError("psutil is required to distinguish native app windows from browser windows.") from exc
     matches = []
     for window in Desktop(backend="uia").windows(visible_only=True):
         try:
             title = (window.window_text() or "").strip()
-            if title and expected in title.casefold() and window.is_visible() and window.is_enabled():
+            process_name = psutil.Process(window.process_id()).name().casefold()
+            if (
+                title and expected in title.casefold()
+                and process_name not in browser_processes
+                and window.is_visible() and window.is_enabled()
+            ):
                 matches.append(window)
         except Exception:
             continue
@@ -326,10 +336,10 @@ def _desktop_click(description: str, platform: dict, recipient: str = "") -> str
         name, kind = item["name"].casefold(), item["type"]
         score = None
         if query == "search field":
-            if kind == "Edit" and ("search" in name or not name):
-                score = 0 if "search" in name else 2
-            elif kind == "Button" and "search" in name:
-                score = 3
+            if kind == "Edit" and ("search" in name or "find" in name):
+                score = 0
+            elif kind in {"Button", "ComboBox"} and ("search" in name or "find" in name):
+                score = 1
         elif query.startswith("search result named "):
             target = recipient or description[len("search result named "):]
             if name == target.casefold() and kind in {"Text", "Button", "ListItem", "Hyperlink"}:
@@ -351,7 +361,7 @@ def _desktop_click(description: str, platform: dict, recipient: str = "") -> str
             if kind == "Button" and "video" in name and "call" in name:
                 score = 0
         elif query == "end call button":
-            if kind == "Button" and ("end call" in name or "hang up" in name or "leave call" in name):
+            if kind == "Button" and ("end call" in name or "hang up" in name or "leave call" in name or "leave huddle" in name or "disconnect" in name):
                 score = 0
         if score is not None:
             candidates.append((score, item))
