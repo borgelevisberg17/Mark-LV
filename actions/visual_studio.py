@@ -54,7 +54,7 @@ def _validate_epub_archive(path: Path) -> tuple[list[str], str]:
                 name = info.filename
                 normalized = posixpath.normpath(name)
                 if (
-                    not name or name.startswith("/") or "\\\\" in name
+                    not name or name.startswith("/") or "\\" in name
                     or normalized in {".", ".."} or normalized.startswith("../")
                     or (len(name) >= 2 and name[1] == ":")
                 ):
