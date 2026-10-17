@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from actions.visual_studio import _compose_cover_text, _extract_image, _insert_docx, _insert_epub_cover, _insert_pptx, _publish_preview, visual_studio
+from actions.visual_studio import _compose_cover_text, _extract_image, _insert_docx, _insert_epub_cover, _insert_pptx, _publish_preview, _validate_epub_archive, visual_studio
 
 
 class VisualStudioUnitTests(unittest.TestCase):
@@ -30,6 +30,39 @@ class VisualStudioUnitTests(unittest.TestCase):
 
     def test_preview_is_not_attempted_without_dashboard_context(self):
         self.assertFalse(_publish_preview(Path("missing.png"), {}, dashboard=None, event_loop=None))
+
+    def test_epub_validation_rejects_unsafe_archive_path(self):
+        import zipfile
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "unsafe.epub"
+            container = (
+                '<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0">'
+                '<rootfiles><rootfile full-path="EPUB/package.opf"/></rootfiles></container>'
+            )
+            opf = (
+                '<package xmlns="http://www.idpf.org/2007/opf" '
+                'xmlns:dc="http://purl.org/dc/elements/1.1/" version="3.0">'
+                '<metadata><dc:title>Test</dc:title></metadata><manifest/><spine/></package>'
+            )
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+                archive.writestr("META-INF/container.xml", container)
+                archive.writestr("EPUB/package.opf", opf)
+                archive.writestr(chr(46) * 2 + "/outside.txt", "unsafe")
+            with self.assertRaisesRegex(ValueError, "unsafe archive path"):
+                _validate_epub_archive(path)
+
+    def test_epub_validation_requires_uncompressed_mimetype_first(self):
+        import zipfile
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "bad-order.epub"
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr("META-INF/container.xml", "<container/>")
+                archive.writestr("mimetype", "application/epub+zip")
+            with self.assertRaisesRegex(ValueError, "begin with an uncompressed mimetype"):
+                _validate_epub_archive(path)
 
     @unittest.skipUnless(importlib.util.find_spec("PIL"), "Pillow is not installed")
     def test_cover_typography_creates_separate_valid_asset(self):

@@ -26,6 +26,72 @@ _ALLOWED_ASPECT_RATIOS = {"1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16
 _ALLOWED_IMAGE_SIZES = {"1K", "2K", "4K"}
 _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 
+_MAX_EPUB_ENTRIES = 10000
+_MAX_EPUB_MEMBER_BYTES = 100 * 1024 * 1024
+_MAX_EPUB_EXPANDED_BYTES = 750 * 1024 * 1024
+_MAX_EPUB_COMPRESSION_RATIO = 1000
+
+
+def _validate_epub_archive(path: Path) -> tuple[list[str], str]:
+    """Validate EPUB ZIP structure and resource bounds without extracting members."""
+    if not zipfile.is_zipfile(path):
+        raise ValueError("Target EPUB is not a valid ZIP package.")
+    try:
+        with zipfile.ZipFile(path, "r") as archive:
+            infos = archive.infolist()
+            if not infos or len(infos) > _MAX_EPUB_ENTRIES:
+                raise ValueError(f"EPUB must contain between 1 and {_MAX_EPUB_ENTRIES} archive entries.")
+            names = [info.filename for info in infos]
+            if len(names) != len(set(names)):
+                raise ValueError("EPUB contains duplicate archive paths; refusing ambiguous edits.")
+            if names[0] != "mimetype" or infos[0].compress_type != zipfile.ZIP_STORED:
+                raise ValueError("EPUB must begin with an uncompressed mimetype entry.")
+            if infos[0].file_size != len(b"application/epub+zip"):
+                raise ValueError("EPUB mimetype entry is missing or invalid.")
+            if archive.read("mimetype") != b"application/epub+zip":
+                raise ValueError("EPUB mimetype entry is missing or invalid.")
+
+            expanded_total = 0
+            for info in infos:
+                name = info.filename
+                normalized = posixpath.normpath(name)
+                if (
+                    not name or name.startswith("/") or "\\" in name
+                    or normalized in {".", ".."} or normalized.startswith("../")
+                    or (len(name) >= 2 and name[1] == ":")
+                ):
+                    raise ValueError("EPUB contains an unsafe archive path.")
+                mode = (info.external_attr >> 16) & 0o170000
+                if mode == 0o120000:
+                    raise ValueError("EPUB symbolic links are not supported.")
+                if info.file_size > _MAX_EPUB_MEMBER_BYTES:
+                    raise ValueError("An EPUB archive member exceeds the 100 MiB safety limit.")
+                expanded_total += info.file_size
+                if expanded_total > _MAX_EPUB_EXPANDED_BYTES:
+                    raise ValueError("EPUB expanded contents exceed the 750 MiB safety limit.")
+                if info.file_size > 1024 * 1024 and info.compress_size > 0:
+                    if info.file_size / info.compress_size > _MAX_EPUB_COMPRESSION_RATIO:
+                        raise ValueError("EPUB contains a suspiciously high compression ratio.")
+
+            container = ET.fromstring(archive.read("META-INF/container.xml"))
+            rootfile = next(
+                (node for node in container.iter() if node.tag.rsplit("}", 1)[-1] == "rootfile"),
+                None,
+            )
+            opf_path = rootfile.attrib.get("full-path", "") if rootfile is not None else ""
+            normalized_opf = posixpath.normpath(opf_path)
+            if (
+                not opf_path or normalized_opf != opf_path or opf_path not in names
+                or opf_path.startswith("/") or normalized_opf == ".."
+                or normalized_opf.startswith("../")
+            ):
+                raise ValueError("EPUB package document could not be located safely.")
+            ET.fromstring(archive.read(opf_path))
+            return names, opf_path
+    except (KeyError, ET.ParseError, zipfile.BadZipFile, RuntimeError) as exc:
+        raise ValueError("EPUB package is incomplete, encrypted or malformed.") from exc
+
+
 
 def _api_key() -> str:
     """Read the same local API-key configuration used by the main Gemini client."""
@@ -54,6 +120,10 @@ def _image_path(raw: str) -> Path:
     from PIL import Image
     with Image.open(path) as image:
         image.verify()
+    with Image.open(path) as image:
+        if image.width <= 0 or image.height <= 0 or image.width * image.height > _MAX_PIXELS:
+            raise ValueError("Source image exceeds the safe pixel limit.")
+        image.load()
     return path
 
 
@@ -195,22 +265,7 @@ def _preflight_target(raw_target: str, slide_index=None, pptx_placement=None, sh
     if target.stat().st_size > 100 * 1024 * 1024:
         raise ValueError("Target document exceeds the 100 MiB limit.")
     if target.suffix.lower() == ".epub":
-        if not zipfile.is_zipfile(target):
-            raise ValueError("Target EPUB is not a valid ZIP package.")
-        try:
-            with zipfile.ZipFile(target) as archive:
-                container = ET.fromstring(archive.read("META-INF/container.xml"))
-                rootfile = next(
-                    (node for node in container.iter()
-                     if node.tag.rsplit("}", 1)[-1] == "rootfile"),
-                    None,
-                )
-                opf_path = rootfile.attrib.get("full-path", "") if rootfile is not None else ""
-                if not opf_path or opf_path not in archive.namelist() or posixpath.normpath(opf_path).startswith("../"):
-                    raise ValueError("EPUB package document could not be located safely.")
-                ET.fromstring(archive.read(opf_path))
-        except (KeyError, ET.ParseError, zipfile.BadZipFile) as exc:
-            raise ValueError("Target EPUB package is incomplete or malformed.") from exc
+        _validate_epub_archive(target)
     if target.suffix.lower() == ".pptx" and slide_index is not None:
         from pptx import Presentation
         presentation = Presentation(target)
@@ -444,8 +499,9 @@ def _insert_epub_cover(image_path: Path, raw_target: str, title: str = "", alt_t
     target = resolve_user_path(raw_target, roots=user_accessible_roots(), must_exist=True)
     if not target.is_file() or target.suffix.lower() != ".epub":
         raise ValueError("EPUB cover insertion requires an existing .epub file.")
-    if target.stat().st_size > 100 * 1024 * 1024 or not zipfile.is_zipfile(target):
-        raise ValueError("Target EPUB is invalid or exceeds the 100 MiB limit.")
+    if target.stat().st_size > 100 * 1024 * 1024:
+        raise ValueError("Target EPUB exceeds the 100 MiB compressed-file limit.")
+    _validate_epub_archive(target)
     from PIL import Image
     with Image.open(image_path) as opened:
         opened.verify()

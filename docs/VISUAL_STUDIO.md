@@ -27,7 +27,9 @@ Modelo predefinido: `gemini-2.5-flash-image`. É possível indicar `model` expli
 - Entradas suportadas para edição/inserção: PNG, JPEG e WEBP.
 - Limite da imagem de origem: 20 MiB; limite do resultado: 30 MiB.
 - DOCX/PPTX de destino limitados a 100 MiB.
-- As imagens geradas são verificadas com Pillow; os pacotes Office são reabertos como ZIP e verificados antes de guardar.
+- As imagens geradas e as imagens fornecidas para inserção são verificadas com Pillow, incluindo limites de dimensão/píxeis.
+- Antes de alterar um EPUB, a action valida a entrada `mimetype` obrigatória, a localização do OPF, nomes de membros duplicados, caminhos inseguros, links simbólicos, quantidade de entradas, tamanho expandido e rácios de compressão suspeitos. Os limites atuais são 10 000 entradas, 100 MiB por membro e 750 MiB no total expandido; o EPUB comprimido continua limitado a 100 MiB.
+- Os pacotes de saída são verificados antes de serem publicados; os limites de segurança não substituem EPUBCheck nem a validação em leitores reais.
 - A geração exige rede, uma chave Gemini válida, quota e acesso ao modelo. Os testes automáticos não fazem chamadas pagas à API.
 - A inserção é baseada em bibliotecas locais e pode não preservar recursos Office fora do que estas bibliotecas suportam. Validar documentos importantes na aplicação Office de destino.
 
