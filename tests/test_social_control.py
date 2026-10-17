@@ -67,7 +67,7 @@ def test_unverified_recipient_stops_before_composer_is_touched():
         click.assert_any_call(platform["search"])
         click.assert_any_call(("Bob",))
         type_text.assert_any_call(platform["search"], "Bob")
-        type_text.assert_not_called_with(platform["composer"], "Hello")
+        assert type_text.call_count == 1
 
 
 def test_empty_message_is_rejected():
