@@ -278,3 +278,26 @@ def test_plan_rejects_calls_not_configured_for_platform():
         "recipient": "Alice",
     })
     assert "not configured" in result
+
+
+
+def test_ambiguous_click_result_is_not_treated_as_success():
+    with patch.object(social, "_browser", return_value="Ambiguous click target for 'Send': 2 matches. No click was performed.") as browser:
+        try:
+            social._click_first(("Send", "Message"))
+        except RuntimeError as exc:
+            assert "uncertain" in str(exc).lower() or "outcome" in str(exc).lower()
+        else:
+            raise AssertionError("Ambiguous click target must fail closed")
+        browser.assert_called_once()
+
+
+def test_ambiguous_input_result_is_not_treated_as_success():
+    with patch.object(social, "_browser", return_value="Ambiguous input target for 'Message': 2 matches. No text was entered.") as browser:
+        try:
+            social._type_first(("Message",), "private text")
+        except RuntimeError as exc:
+            assert "uncertain" in str(exc).lower() or "outcome" in str(exc).lower()
+        else:
+            raise AssertionError("Ambiguous input target must fail closed")
+        browser.assert_called_once()

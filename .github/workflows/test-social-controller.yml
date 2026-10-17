@@ -4,16 +4,23 @@ on:
   pull_request:
     paths:
       - "actions/social_control.py"
+      - "actions/browser_control.py"
+      - "extensions/edge-bridge/service_worker.js"
       - "tests/test_social_control.py"
+      - "tests/test_browser_unique_locators.py"
       - ".github/workflows/test-social-controller.yml"
   push:
     branches:
       - "feat/local-social-ui-controller"
       - "feat/social-automation-scenarios"
+      - "feat/social-unique-targets"
       - "feat/local-social-desktop-ui"
     paths:
       - "actions/social_control.py"
+      - "actions/browser_control.py"
+      - "extensions/edge-bridge/service_worker.js"
       - "tests/test_social_control.py"
+      - "tests/test_browser_unique_locators.py"
       - ".github/workflows/test-social-controller.yml"
 
 permissions:
@@ -31,6 +38,8 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install test runner
-        run: python -m pip install --disable-pip-version-check pytest
+        run: python -m pip install --disable-pip-version-check pytest playwright
+      - name: Check Edge extension JavaScript syntax
+        run: node --check extensions/edge-bridge/service_worker.js
       - name: Run social controller unit tests
-        run: python -m pytest -q tests/test_social_control.py
+        run: python -m pytest -q tests/test_social_control.py tests/test_browser_unique_locators.py
