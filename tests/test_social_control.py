@@ -1,7 +1,7 @@
 """Unit tests for the API-free social UI controller."""
 import importlib.util
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "actions" / "social_control.py"
 SPEC = importlib.util.spec_from_file_location("social_control_test_module", MODULE_PATH)
@@ -84,3 +84,97 @@ def test_action_contract_is_discoverable():
     assert social.TOOL["name"] == "social_control"
     assert callable(social.TOOL["handler"])
     assert social.TOOL["parameters"]["required"] == ["platform", "action"]
+
+
+
+def test_desktop_prepare_stops_when_active_header_does_not_match():
+    platform = social._PLATFORMS["whatsapp"]
+    snapshots = [
+        {"visible_text": "Inbox", "active_conversation_title": "", "message_composer_text": "", "visible_controls": []},
+        {"visible_text": "Alice Bob", "active_conversation_title": "", "message_composer_text": "", "visible_controls": []},
+        {"visible_text": "Chat with Alice", "active_conversation_title": "Alice", "message_composer_text": "", "visible_controls": []},
+    ]
+    with patch.object(social, "_desktop_window", return_value=MagicMock()), \
+         patch.object(social, "_desktop_snapshot", side_effect=snapshots), \
+         patch.object(social, "_desktop_click") as click, \
+         patch.object(social, "_desktop_type") as type_text:
+        try:
+            social._desktop_prepare_message(platform, "Bob", "Hello")
+        except RuntimeError as exc:
+            assert "active conversation header could not be verified" in str(exc)
+        else:
+            raise AssertionError("A mismatched desktop conversation must stop")
+        assert not any(call.args[0] == "message composer" for call in click.call_args_list)
+        type_text.assert_called_once_with(platform, "Bob")
+
+
+def test_desktop_prepare_requires_exact_composer_draft():
+    platform = social._PLATFORMS["whatsapp"]
+    snapshots = [
+        {"visible_text": "Inbox", "active_conversation_title": "", "message_composer_text": "", "visible_controls": []},
+        {"visible_text": "Alice", "active_conversation_title": "", "message_composer_text": "", "visible_controls": []},
+        {"visible_text": "Alice", "active_conversation_title": "Alice", "message_composer_text": "", "visible_controls": []},
+        {"visible_text": "Alice", "active_conversation_title": "Alice", "message_composer_text": "Hello", "visible_controls": []},
+    ]
+    with patch.object(social, "_desktop_window", return_value=MagicMock()), \
+         patch.object(social, "_desktop_snapshot", side_effect=snapshots), \
+         patch.object(social, "_desktop_click") as click, \
+         patch.object(social, "_desktop_type") as type_text:
+        result = social._desktop_prepare_message(platform, "Alice", "Hello")
+    assert "Draft prepared" in result
+    assert click.call_args_list[-1].args[0] == "message composer"
+    type_text.assert_any_call(platform, "Hello")
+
+
+def test_desktop_send_never_clicks_send_if_preparation_fails():
+    platform = social._PLATFORMS["whatsapp"]
+    with patch.object(social, "_desktop_prepare_message", side_effect=RuntimeError("header not verified")), \
+         patch.object(social, "_desktop_click") as click:
+        try:
+            social._desktop_send_message(platform, "Alice", "Hello")
+        except RuntimeError as exc:
+            assert "header not verified" in str(exc)
+        else:
+            raise AssertionError("Unverified preparation must stop before sending")
+        click.assert_not_called()
+
+
+def test_desktop_send_requires_message_in_history_and_cleared_composer():
+    platform = social._PLATFORMS["whatsapp"]
+    verified = {
+        "visible_text": "Alice\\nHello",
+        "active_conversation_title": "Alice",
+        "message_composer_text": "",
+        "visible_controls": [],
+    }
+    with patch.object(social, "_desktop_prepare_message", return_value="Draft prepared"), \
+         patch.object(social, "_desktop_click") as click, \
+         patch.object(social, "_desktop_snapshot", return_value=verified):
+        result = social._desktop_send_message(platform, "Alice", "Hello")
+    assert "does not prove server receipt" in result
+    click.assert_called_once_with("send message button", platform)
+
+
+def test_desktop_send_fails_if_text_remains_in_composer():
+    platform = social._PLATFORMS["whatsapp"]
+    still_draft = {
+        "visible_text": "Alice\\nHello",
+        "active_conversation_title": "Alice",
+        "message_composer_text": "Hello",
+        "visible_controls": [],
+    }
+    with patch.object(social, "_desktop_prepare_message", return_value="Draft prepared"), \
+         patch.object(social, "_desktop_click"), \
+         patch.object(social, "_desktop_snapshot", return_value=still_draft):
+        try:
+            social._desktop_send_message(platform, "Alice", "Hello")
+        except RuntimeError as exc:
+            assert "composer cleared" in str(exc)
+        else:
+            raise AssertionError("A still-populated composer must not be treated as a sent message")
+
+
+def test_every_configured_social_platform_has_an_approved_app_launcher_alias():
+    from actions.open_app import _normalize
+    for platform in social._PLATFORMS.values():
+        assert _normalize(platform["app"]) is not None, platform["app"]

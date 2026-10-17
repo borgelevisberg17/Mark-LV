@@ -57,6 +57,7 @@ _APP_ALIASES: dict[str, dict[str, str]] = {
     "calculator":         {"Windows": "calc.exe",                "Darwin": "Calculator",           "Linux": "gnome-calculator"},
     "paint":              {"Windows": "mspaint.exe",             "Darwin": "Preview",              "Linux": "gimp"},
     "instagram":          {"Windows": "Instagram",               "Darwin": "Instagram",            "Linux": "firefox"},
+    "messenger":          {"Windows": "Messenger",               "Darwin": "Messenger",            "Linux": "firefox"},
     "tiktok":             {"Windows": "TikTok",                  "Darwin": "TikTok",               "Linux": "firefox"},
     "notion":             {"Windows": "Notion",                  "Darwin": "Notion",               "Linux": "notion"},
     "obsidian":           {"Windows": "Obsidian",                "Darwin": "Obsidian",             "Linux": "obsidian"},
