@@ -54,17 +54,20 @@ def test_inspect_reports_bridge_errors_as_failure():
 
 def test_unverified_recipient_stops_before_composer_is_touched():
     platform = social._PLATFORMS["whatsapp"]
-    with patch.object(social, "_checked_page", return_value=("https://web.whatsapp.com/", "Chat with Alice")), \
-         patch.object(social, "_click_first") as click, \
-         patch.object(social, "_type_first") as type_text:
+    with patch.object(social, "_checked_page", side_effect=[
+        ("https://web.whatsapp.com/", "Inbox"),
+        ("https://web.whatsapp.com/", "Chat with Alice"),
+    ]), patch.object(social, "_click_first") as click, patch.object(social, "_type_first") as type_text:
         try:
             social._prepare_message(platform, "Bob", "Hello")
         except RuntimeError as exc:
-            assert "not yet been verified" in str(exc)
+            assert "could not be verified after selection" in str(exc)
         else:
             raise AssertionError("Unverified recipient must stop the operation")
-        click.assert_called_once_with(platform["search"])
-        type_text.assert_called_once_with(platform["search"], "Bob")
+        click.assert_any_call(platform["search"])
+        click.assert_any_call(("Bob",))
+        type_text.assert_any_call(platform["search"], "Bob")
+        type_text.assert_not_called_with(platform["composer"], "Hello")
 
 
 def test_empty_message_is_rejected():
