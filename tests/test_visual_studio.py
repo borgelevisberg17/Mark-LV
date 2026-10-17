@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from actions.visual_studio import _compose_cover_text, _extract_image, _insert_docx, _insert_pptx, _publish_preview, visual_studio
+from actions.visual_studio import _compose_cover_text, _extract_image, _insert_docx, _insert_epub_cover, _insert_pptx, _publish_preview, visual_studio
 
 
 class VisualStudioUnitTests(unittest.TestCase):
@@ -151,6 +151,57 @@ class VisualStudioOfficeInsertionTests(unittest.TestCase):
             self.assertEqual(shapes[0].shape_type, 13)
             self.assertEqual(shapes[0]._element.nvPicPr.cNvPr.get("descr"), "Updated product illustration")
             self.assertTrue(source.is_file())
+
+    @unittest.skipUnless(importlib.util.find_spec("PIL"), "Pillow is not installed")
+    def test_insert_epub_cover_adds_metadata_and_accessible_cover_page(self):
+        from PIL import Image
+        import xml.etree.ElementTree as ET
+        import zipfile
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            image_path = root / "cover.png"
+            Image.new("RGB", (600, 900), "navy").save(image_path)
+            source = root / "book.epub"
+            container = (
+                '<?xml version="1.0"?>'
+                '<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0">'
+                '<rootfiles><rootfile full-path="EPUB/package.opf" media-type="application/oebps-package+xml"/>'
+                '</rootfiles></container>'
+            )
+            opf = (
+                '<?xml version="1.0"?>'
+                '<package xmlns="http://www.idpf.org/2007/opf" '
+                'xmlns:dc="http://purl.org/dc/elements/1.1/" version="3.0" unique-identifier="uid">'
+                '<metadata><dc:identifier id="uid">urn:test:book</dc:identifier><dc:title>Test Book</dc:title>'
+                '<dc:language>en</dc:language></metadata>'
+                '<manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/></manifest>'
+                '<spine><itemref idref="chapter"/></spine></package>'
+            )
+            with zipfile.ZipFile(source, "w") as archive:
+                archive.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+                archive.writestr("META-INF/container.xml", container)
+                archive.writestr("EPUB/package.opf", opf)
+                archive.writestr("EPUB/chapter.xhtml", "<html xmlns='http://www.w3.org/1999/xhtml'><body>Chapter</body></html>")
+
+            output = _insert_epub_cover(image_path, str(source), title="Enterprise Cover", alt_text="A navy book cover")
+            self.assertTrue(output.is_file())
+            self.assertTrue(source.is_file(), "Original EPUB must remain unchanged")
+            with zipfile.ZipFile(output) as archive:
+                self.assertIsNone(archive.testzip())
+                package = ET.fromstring(archive.read("EPUB/package.opf"))
+                ns = {"opf": "http://www.idpf.org/2007/opf"}
+                cover_item = next(item for item in package.findall(".//opf:manifest/opf:item", ns)
+                                  if item.get("properties") == "cover-image")
+                self.assertTrue(cover_item.get("href"))
+                self.assertTrue(any(item.get("name") == "cover" and item.get("content") == cover_item.get("id")
+                                    for item in package.findall(".//opf:metadata/opf:meta", ns)))
+                spine_refs = package.findall(".//opf:spine/opf:itemref", ns)
+                self.assertEqual(spine_refs[0].get("idref"), "marklv-cover-page")
+                cover_page = archive.read("EPUB/marklv-cover.xhtml").decode("utf-8")
+                self.assertIn('alt="A navy book cover"', cover_page)
+                self.assertIn("Enterprise Cover", cover_page)
+                self.assertIn("EPUB/chapter.xhtml", archive.namelist())
 
     def test_insert_pptx_appends_visual_slide_and_preserves_source(self):
         from PIL import Image

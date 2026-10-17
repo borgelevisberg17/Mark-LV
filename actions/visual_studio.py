@@ -6,10 +6,13 @@ import base64
 import json
 import mimetypes
 import os
+import posixpath
 import sys
 import uuid
 import zipfile
+import html
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
 from actions._office_common import safe_filename, safe_output_directory, unique_output_path
 from core.path_policy import PathPolicyError, resolve_user_path, user_accessible_roots
@@ -187,10 +190,27 @@ def _preflight_target(raw_target: str, slide_index=None, pptx_placement=None, sh
     if not raw_target.strip():
         return None
     target = resolve_user_path(raw_target.strip(), roots=user_accessible_roots(), must_exist=True)
-    if not target.is_file() or target.suffix.lower() not in {".docx", ".pptx"}:
-        raise ValueError("target_file_path must point to an existing .docx or .pptx file.")
+    if not target.is_file() or target.suffix.lower() not in {".docx", ".pptx", ".epub"}:
+        raise ValueError("target_file_path must point to an existing .docx, .pptx or .epub file.")
     if target.stat().st_size > 100 * 1024 * 1024:
-        raise ValueError("Target Office file exceeds the 100 MiB limit.")
+        raise ValueError("Target document exceeds the 100 MiB limit.")
+    if target.suffix.lower() == ".epub":
+        if not zipfile.is_zipfile(target):
+            raise ValueError("Target EPUB is not a valid ZIP package.")
+        try:
+            with zipfile.ZipFile(target) as archive:
+                container = ET.fromstring(archive.read("META-INF/container.xml"))
+                rootfile = next(
+                    (node for node in container.iter()
+                     if node.tag.rsplit("}", 1)[-1] == "rootfile"),
+                    None,
+                )
+                opf_path = rootfile.attrib.get("full-path", "") if rootfile is not None else ""
+                if not opf_path or opf_path not in archive.namelist() or posixpath.normpath(opf_path).startswith("../"):
+                    raise ValueError("EPUB package document could not be located safely.")
+                ET.fromstring(archive.read(opf_path))
+        except (KeyError, ET.ParseError, zipfile.BadZipFile) as exc:
+            raise ValueError("Target EPUB package is incomplete or malformed.") from exc
     if target.suffix.lower() == ".pptx" and slide_index is not None:
         from pptx import Presentation
         presentation = Presentation(target)
@@ -414,6 +434,125 @@ def _insert_pptx(image_path: Path, raw_target: str, slide_index=None, caption: s
 
 
 
+def _insert_epub_cover(image_path: Path, raw_target: str, title: str = "", alt_text: str = "") -> Path:
+    """Add an accessible cover image and cover page to a new EPUB copy.
+
+    Existing archive members are retained; the original EPUB is never overwritten.
+    Both EPUB 3 cover-image properties and the EPUB 2 cover metadata convention
+    are written for broad reader compatibility.
+    """
+    target = resolve_user_path(raw_target, roots=user_accessible_roots(), must_exist=True)
+    if not target.is_file() or target.suffix.lower() != ".epub":
+        raise ValueError("EPUB cover insertion requires an existing .epub file.")
+    if target.stat().st_size > 100 * 1024 * 1024 or not zipfile.is_zipfile(target):
+        raise ValueError("Target EPUB is invalid or exceeds the 100 MiB limit.")
+    from PIL import Image
+    with Image.open(image_path) as opened:
+        opened.verify()
+    extension = image_path.suffix.lower()
+    mime = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}.get(extension)
+    if not mime:
+        raise ValueError("EPUB cover must be PNG, JPEG or WEBP.")
+    if extension == ".jpeg":
+        extension = ".jpg"
+
+    output = unique_output_path(
+        target.parent,
+        safe_filename(target.stem + "-with-cover", target.stem + "-with-cover", ".epub"),
+    )
+    temporary = output.with_name(f".{output.stem}-{uuid.uuid4().hex}.tmp.epub")
+    ns = {
+        "opf": "http://www.idpf.org/2007/opf",
+        "dc": "http://purl.org/dc/elements/1.1/",
+    }
+    ET.register_namespace("", ns["opf"])
+    ET.register_namespace("dc", ns["dc"])
+    try:
+        with zipfile.ZipFile(target, "r") as source:
+            names = source.namelist()
+            if len(names) != len(set(names)):
+                raise ValueError("EPUB contains duplicate archive paths; refusing ambiguous edits.")
+            container = ET.fromstring(source.read("META-INF/container.xml"))
+            rootfile = next((node for node in container.iter() if node.tag.rsplit("}", 1)[-1] == "rootfile"), None)
+            opf_path = rootfile.attrib.get("full-path", "") if rootfile is not None else ""
+            if not opf_path or opf_path not in names or posixpath.normpath(opf_path).startswith("../"):
+                raise ValueError("EPUB package document could not be located safely.")
+            package = ET.fromstring(source.read(opf_path))
+            manifest = package.find(f"{{{ns['opf']}}}manifest")
+            spine = package.find(f"{{{ns['opf']}}}spine")
+            metadata = package.find(f"{{{ns['opf']}}}metadata")
+            if manifest is None or spine is None or metadata is None:
+                raise ValueError("EPUB package is missing required metadata, manifest or spine.")
+            opf_dir = posixpath.dirname(opf_path)
+            image_dir = posixpath.join(opf_dir, "images") if opf_dir else "images"
+            used_ids = {item.get("id", "") for item in manifest}
+            image_id = "marklv-generated-cover"
+            suffix = 2
+            while image_id in used_ids:
+                image_id = f"marklv-generated-cover-{suffix}"
+                suffix += 1
+            page_id = "marklv-cover-page"
+            suffix = 2
+            while page_id in used_ids or page_id == image_id:
+                page_id = f"marklv-cover-page-{suffix}"
+                suffix += 1
+            image_name = f"{target.stem}-cover{extension}"
+            image_archive_path = posixpath.join(image_dir, image_name)
+            cover_page_name = "marklv-cover.xhtml"
+            page_archive_path = posixpath.join(opf_dir, cover_page_name) if opf_dir else cover_page_name
+            counter = 2
+            while image_archive_path in names or page_archive_path in names:
+                image_name = f"{target.stem}-cover-{counter}{extension}"
+                image_archive_path = posixpath.join(image_dir, image_name)
+                cover_page_name = f"marklv-cover-{counter}.xhtml"
+                page_archive_path = posixpath.join(opf_dir, cover_page_name) if opf_dir else cover_page_name
+                counter += 1
+            image_href = posixpath.relpath(image_archive_path, opf_dir or ".")
+            page_href = posixpath.relpath(page_archive_path, opf_dir or ".")
+            ET.SubElement(manifest, f"{{{ns['opf']}}}item", {
+                "id": image_id, "href": image_href, "media-type": mime, "properties": "cover-image"
+            })
+            ET.SubElement(manifest, f"{{{ns['opf']}}}item", {
+                "id": page_id, "href": page_href, "media-type": "application/xhtml+xml"
+            })
+            spine.insert(0, ET.Element(f"{{{ns['opf']}}}itemref", {"idref": page_id, "linear": "yes"}))
+            for old_meta in list(metadata):
+                if old_meta.tag.rsplit("}", 1)[-1] == "meta" and old_meta.get("name") == "cover":
+                    metadata.remove(old_meta)
+            ET.SubElement(metadata, f"{{{ns['opf']}}}meta", {"name": "cover", "content": image_id})
+            title_text = (title or target.stem).strip()[:300]
+            alt = (alt_text or f"Cover artwork for {title_text}").strip()[:1000]
+            xhtml = (
+                '<?xml version="1.0" encoding="utf-8"?>'
+                '<!DOCTYPE html><html xmlns="http://www.w3.org/1999/xhtml" '
+                'xmlns:epub="http://www.idpf.org/2007/ops"><head>'
+                '<title>' + html.escape(title_text) + '</title>'
+                '<meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/>'
+                '<style>html,body{margin:0;padding:0;text-align:center}img{display:block;max-width:100%;max-height:100vh;width:auto;height:auto;margin:0 auto}</style>'
+                '</head><body><section epub:type="cover"><img src="' + html.escape(image_href, quote=True)
+                + '" alt="' + html.escape(alt, quote=True) + '"/></section></body></html>'
+            ).encode("utf-8")
+            package_bytes = ET.tostring(package, encoding="utf-8", xml_declaration=True)
+            with zipfile.ZipFile(temporary, "w") as destination:
+                for info in source.infolist():
+                    if info.filename == opf_path:
+                        destination.writestr(info, package_bytes)
+                    else:
+                        destination.writestr(info, source.read(info.filename))
+                destination.writestr(image_archive_path, image_path.read_bytes(), compress_type=zipfile.ZIP_DEFLATED)
+                destination.writestr(page_archive_path, xhtml, compress_type=zipfile.ZIP_DEFLATED)
+        with zipfile.ZipFile(temporary, "r") as check:
+            if check.testzip() is not None:
+                raise ValueError("Generated EPUB failed ZIP integrity validation.")
+            ET.fromstring(check.read(opf_path))
+            if image_archive_path not in check.namelist() or page_archive_path not in check.namelist():
+                raise ValueError("Generated EPUB cover assets are missing.")
+        os.replace(temporary, output)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return output
+
+
 _PREVIEW_MAX_BYTES = 4 * 1024 * 1024
 
 def _publish_preview(image_path: Path, params: dict, dashboard=None, event_loop=None, inserted_path: Path | None = None) -> bool:
@@ -461,6 +600,8 @@ def visual_studio(parameters: dict, player=None, speak=None, dashboard=None, eve
                 if target_path.suffix.lower() == ".docx":
                     mode = str(params.get("docx_insertion_mode", "cover") or "cover").lower()
                     inserted = _insert_docx(image_path, target, mode, caption, str(params.get("insert_after_text", "") or ""), str(params.get("alt_text", "") or ""))
+                elif target_path.suffix.lower() == ".epub":
+                    inserted = _insert_epub_cover(image_path, target, str(params.get("cover_title", "") or params.get("preview_title", "") or ""), str(params.get("alt_text", "") or ""))
                 else:
                     placement = str(params.get("pptx_placement", "") or ("contain" if params.get("slide_index") is not None else "append_slide"))
                     inserted = _insert_pptx(image_path, target, params.get("slide_index"), caption, placement, params.get("shape_index"), str(params.get("alt_text", "") or ""))
@@ -480,6 +621,8 @@ def visual_studio(parameters: dict, player=None, speak=None, dashboard=None, eve
             if target_path.suffix.lower() == ".docx":
                 mode = str(params.get("docx_insertion_mode", "cover") or "cover").lower()
                 inserted = _insert_docx(image_path, target, mode, caption, str(params.get("insert_after_text", "") or ""), str(params.get("alt_text", "") or ""))
+            elif target_path.suffix.lower() == ".epub":
+                inserted = _insert_epub_cover(image_path, target, str(params.get("cover_title", "") or params.get("preview_title", "") or ""), str(params.get("alt_text", "") or ""))
             else:
                 placement = str(params.get("pptx_placement", "") or ("contain" if params.get("slide_index") is not None else "append_slide"))
                 inserted = _insert_pptx(image_path, target, params.get("slide_index"), caption, placement, params.get("shape_index"), str(params.get("alt_text", "") or ""))
@@ -501,12 +644,12 @@ def visual_studio(parameters: dict, player=None, speak=None, dashboard=None, eve
 TOOL = {
     "name": "visual_studio",
     "description": (
-        "Generate or edit images with the configured Gemini image model and optionally insert the result into a new copy of an existing Word or PowerPoint file. "
-        "Operations: generate (prompt to image), edit (prompt plus existing image_path), insert (place existing image into a DOCX cover page or add it to a PPTX slide). "
+        "Generate or edit images with the configured Gemini image model and optionally insert the result into a new copy of an existing Word, PowerPoint or EPUB file. "
+        "Operations: generate (prompt to image), edit (prompt plus existing image_path), insert (place an image into a DOCX, PPTX or EPUB). "
         "Supports covers, illustrations, posters, backgrounds and visual assets. Optional aspect_ratio and image_size tune generation. "
         "cover_title, cover_subtitle and cover_author add readable typography to a designed copy while preserving the raw generated image. "
         "Uses the app's config/api_keys.json Gemini key; never ask the user to paste the key. Existing files are preserved. "
-        "DOCX supports cover or inline insertion after a matching text anchor, optional captions and accessibility alt text. PPTX supports appending a fitted slide, inserting on an existing slide, or replacing an existing picture by zero-based shape_index while preserving its bounds and stacking order. "
+        "DOCX supports cover or inline insertion after a matching text anchor, optional captions and accessibility alt text. PPTX supports appending a fitted slide, inserting on an existing slide, or replacing an existing picture by zero-based shape_index while preserving its bounds and stacking order. EPUB receives a cover image plus an accessible XHTML cover page, EPUB 3 cover-image metadata and EPUB 2-compatible cover metadata; the source book is preserved. "
         "The target is validated before generation to avoid wasting quota on invalid Office paths. Use exact local paths and report output paths only after success."
     ),
     "parameters": {
@@ -515,7 +658,7 @@ TOOL = {
             "operation": {"type": "STRING", "description": "generate | edit | insert"},
             "prompt": {"type": "STRING", "description": "Detailed visual brief; required for generate/edit"},
             "image_path": {"type": "STRING", "description": "Existing PNG/JPEG/WEBP source for edit or insert"},
-            "target_file_path": {"type": "STRING", "description": "Optional existing DOCX/PPTX to receive the generated image automatically"},
+            "target_file_path": {"type": "STRING", "description": "Optional existing DOCX/PPTX/EPUB to receive the generated image automatically; EPUB targets get a cover page and cover metadata"},
             "slide_index": {"type": "INTEGER", "description": "Zero-based PowerPoint slide index for contain/replace_picture; omit to append a new visual slide"},
             "pptx_placement": {"type": "STRING", "description": "append_slide | contain | replace_picture; replace_picture requires slide_index and shape_index"},
             "shape_index": {"type": "INTEGER", "description": "Zero-based shape index on slide_index; required to replace an existing picture"},
