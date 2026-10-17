@@ -394,18 +394,23 @@ def _desktop_type(platform: dict, text: str) -> str:
     if focused is None:
         raise RuntimeError("No focused input field is available; no text was entered.")
     try:
-        if focused.element_info.control_type == "Edit":
+        control_type = str(focused.element_info.control_type or "")
+        if control_type not in {"Edit", "Document", "ComboBox"}:
+            raise RuntimeError(f"Focused control is {control_type or 'unknown'}, not a text input.")
+        if control_type == "Edit":
             try:
                 focused.set_edit_text(text)
+                return "Text entered into the focused local UI control."
             except Exception:
                 # Some Electron controls expose Edit semantics without ValuePattern.
                 focused.set_focus()
-                escaped = text.replace("{", "{{}").replace("}", "{}}")
-                send_keys(escaped, with_spaces=True, pause=0.005)
-        else:
-            # Clipboard-independent local keyboard input; escape pywinauto metacharacters.
-            escaped = text.replace("{", "{{}").replace("}", "{}}")
-            send_keys(escaped, with_spaces=True, pause=0.005)
+        specials = {
+            "{": "{{}", "}": "{}}", "+": "{+}", "^": "{^}",
+            "%": "{%}", "~": "{~}", "(": "{(}", ")": "{)}",
+        }
+        escaped = "".join(specials.get(char, char) for char in text)
+        send_keys("^a", pause=0.005)
+        send_keys(escaped, with_spaces=True, pause=0.005)
         return "Text entered into the focused local UI control."
     except Exception as exc:
         raise RuntimeError(f"Could not enter text into the focused UI control: {exc}") from exc
